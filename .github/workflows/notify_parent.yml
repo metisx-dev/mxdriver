@@ -1,0 +1,19 @@
+name: Notify Parent Git on PR Merge
+
+on:
+  pull_request:
+    types:
+      - closed
+
+jobs:
+  send-dispatch:
+    if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send repository dispatch
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          repository: metisx-dev/sdk_release
+          event-type: main_merged_notification_from_driver
+          client-payload: '{"message": "PR merged into main"}'
