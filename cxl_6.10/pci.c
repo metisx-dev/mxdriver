@@ -592,6 +592,8 @@ static bool cxl_alloc_irq_vectors(struct pci_dev *pdev)
 {
 	int nvecs;
 
+	return false;
+
 	/*
 	 * Per CXL 3.0 3.1.1 CXL.io Endpoint a function on a CXL device must
 	 * not generate INTx messages if that function participates in
