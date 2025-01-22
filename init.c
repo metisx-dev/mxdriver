@@ -8,6 +8,20 @@
 static struct class *mxdma_class;
 static DEFINE_IDA(dev_ids);
 
+static irqreturn_t top_half_handler(int irq, void *dev_id)
+{
+    pr_info("Top-half handler executed (IRQ: %d, dev_id: %p\n", irq, dev_id);
+
+    return IRQ_WAKE_THREAD;
+}
+
+static irqreturn_t bottom_half_thread_fn(int irq, void *dev_id)
+{
+    pr_info("Bottom-half thread function executed (IRQ: %d, dev_id: %p)\n", irq, dev_id);
+
+    return IRQ_HANDLED;
+}
+
 static void pci_device_exit(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
 {
 	if (mx_pdev->has_regions)
@@ -38,6 +52,20 @@ static int pci_device_init(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
 	ret = pci_request_region(pdev, HMBOX_BAR_INDEX, MXDMA_NODE_NAME);
 	if (!ret)
 		mx_pdev->has_regions = true;
+
+	ret = pci_enable_msi(pdev);
+	if (ret) {
+		pr_err("Failed to pci_enable_msi (err=%d)\n", ret);
+	} else {
+		int irq = pci_irq_vector(pdev, 0);
+		pr_info("MSI enabled, irq=%d\n", irq);
+
+		ret = request_threaded_irq(irq, top_half_handler, bottom_half_thread_fn, 0, MXDMA_NODE_NAME, NULL);
+		if (ret) {
+			pr_err("Failed to request_threaded_irq (err=%d)\n", ret);
+			pci_disable_msi(pdev);
+		}
+	}
 
 	return 0;
 }
