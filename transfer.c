@@ -322,10 +322,14 @@ static int mx_transfer_init_ctrl(struct mx_transfer *transfer, int opcode)
 	if (transfer->dir != DMA_TO_DEVICE)
 		return 0;
 
-	ret = copy_from_user(&value, transfer->user_addr, transfer->size);
-	if (ret) {
-		pr_warn("Failed to copy_from_user (err=%d)\n", ret);
-		return ret;
+	if (opcode == MXDMA_OP_CONTEXT_WRITE) {
+		ret = copy_from_user(&value, transfer->user_addr, transfer->size);
+		if (ret) {
+			pr_warn("Failed to copy_from_user (err=%d)\n", ret);
+			return ret;
+		}
+	} else {
+		value = (uint64_t)transfer->user_addr;
 	}
 
 	transfer->cmd.host_addr = value;
