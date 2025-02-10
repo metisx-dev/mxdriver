@@ -47,6 +47,10 @@ enum {
 	MXDMA_TYPE_CONTEXT,
 	MXDMA_TYPE_SQ,
 	MXDMA_TYPE_CQ,
+	MXDMA_TYPE_DATA_NOWAIT,
+	MXDMA_TYPE_CONTEXT_NOWAIT,
+	MXDMA_TYPE_SQ_NOWAIT,
+	MXDMA_TYPE_CQ_NOWAIT,
 	NUM_OF_MXDMA_TYPE,
 };
 
@@ -76,6 +80,10 @@ static const char * const node_name[] = {
 	MXDMA_NODE_NAME "%d_context",
 	MXDMA_NODE_NAME "%d_sq",
 	MXDMA_NODE_NAME "%d_cq",
+	MXDMA_NODE_NAME "%d_data_nowait",
+	MXDMA_NODE_NAME "%d_context_nowait",
+	MXDMA_NODE_NAME "%d_sq_nowait",
+	MXDMA_NODE_NAME "%d_cq_nowait",
 };
 
 typedef union {
@@ -108,7 +116,9 @@ struct mx_command {
 			uint64_t control : 4;
 			uint64_t page_mode : 2;
 			uint64_t id : 16;
-			uint64_t rsvd : 22;
+			uint64_t barrier_index : 6;
+			uint64_t rsvd : 14;
+			uint64_t nowait : 2;
 		};
 		uint64_t header;
 	};
@@ -127,6 +137,7 @@ struct mx_transfer {
 	size_t size;
 	uint64_t device_addr;
 	enum dma_data_direction dir;
+	bool nowait;
 
 	struct mx_command cmd;
 	struct list_head entry;
@@ -163,7 +174,7 @@ struct mx_char_dev {
 	struct cdev cdev;
 	dev_t cdev_no;
 
-	int type;
+	bool nowait;
 	bool enabled;
 };
 
@@ -181,10 +192,11 @@ struct mx_pci_dev {
 
 	struct mx_engine engine;
 
+	int num_of_cdev;
 	struct mx_char_dev mx_cdev[NUM_OF_MXDMA_TYPE];
 };
 
-extern struct file_operations mxdma_fops;
+extern struct file_operations *mxdma_fops_array[];
 
 int mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id);
 void mxdma_driver_remove(struct pci_dev *pdev);
@@ -193,14 +205,14 @@ int transfer_id_alloc(void *ptr);
 void transfer_id_free(unsigned long id);
 void *find_transfer_by_id(unsigned long id);
 
-ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode);
-ssize_t write_data_to_device_parallel(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode);
+ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
+ssize_t write_data_to_device_parallel(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
 
-ssize_t read_data_from_device(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode);
-ssize_t write_data_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode);
+ssize_t read_data_from_device(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
+ssize_t write_data_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
 
-ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode);
-ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode);
+ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
+ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
 
 int mx_command_submit_handler(void *arg);
 int mx_command_complete_handler(void *arg);

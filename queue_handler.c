@@ -158,6 +158,11 @@ int mx_command_submit_handler(void *arg)
 
 			atomic_inc(&wait_count);
 			push_mx_command(sq_mbox, &transfer->cmd);
+
+			if (transfer->nowait) {
+				transfer->cmd.control = MXDMA_TRANSFER_COMPLETE;
+				complete(&transfer->done);
+			}
 		} else {
 			msleep(SQ_POLLING_MSEC);
 		}
@@ -190,10 +195,8 @@ int mx_command_complete_handler(void *arg)
 			}
 
 			transfer = find_transfer_by_id(cmd.id);
-			if (transfer == NULL) {
-				pr_warn("Can't find transfer by id=%u. Maybe timeout\n", cmd.id);
+			if (transfer == NULL)
 				continue;
-			}
 
 			transfer->cmd.header = cmd.header;
 			transfer->cmd.host_addr = cmd.host_addr;

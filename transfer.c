@@ -243,6 +243,7 @@ static int mx_command_init_common(struct mx_transfer *transfer, int opcode)
 	cmd->id = id;
 	cmd->opcode = opcode;
 	cmd->control = MXDMA_TRANSFER_START;
+	cmd->nowait = transfer->nowait ? 1 : 0;
 	cmd->length = transfer->size;
 	cmd->device_addr = transfer->device_addr;
 
@@ -322,7 +323,7 @@ static int mx_transfer_init_ctrl(struct mx_transfer *transfer, int opcode)
 	if (transfer->dir != DMA_TO_DEVICE)
 		return 0;
 
-	if (opcode == MXDMA_OP_CONTEXT_WRITE) {
+	if (opcode == MXDMA_OP_CONTEXT_WRITE || transfer->nowait == false) {
 		ret = copy_from_user(&value, transfer->user_addr, transfer->size);
 		if (ret) {
 			pr_warn("Failed to copy_from_user (err=%d)\n", ret);
@@ -469,7 +470,7 @@ static ssize_t mx_transfer_submit_ctrl(struct mx_pci_dev *mx_pdev,
 /* Functions for fops                                                         */
 /******************************************************************************/
 static struct mx_transfer *alloc_mx_transfer(char __user *user_addr, size_t size, uint64_t device_addr,
-		enum dma_data_direction dir)
+		enum dma_data_direction dir, bool nowait)
 {
 	struct mx_transfer *transfer;
 
@@ -482,17 +483,18 @@ static struct mx_transfer *alloc_mx_transfer(char __user *user_addr, size_t size
 	transfer->size = size;
 	transfer->device_addr = device_addr;
 	transfer->dir = dir;
+	transfer->nowait = nowait;
 
 	return transfer;
 }
 
 ssize_t read_data_from_device(struct mx_pci_dev *mx_pdev,
-		char __user *user_addr, size_t size, loff_t *fpos, int opcode)
+		char __user *user_addr, size_t size, loff_t *fpos, int opcode, bool nowait)
 {
 	struct mx_transfer *transfer;
 	ssize_t ret;
 
-	transfer = alloc_mx_transfer(user_addr, size, *fpos, DMA_FROM_DEVICE);
+	transfer = alloc_mx_transfer(user_addr, size, *fpos, DMA_FROM_DEVICE, nowait);
 	if (!transfer) {
 		pr_warn("Failed to alloc mx_transfer\n");
 		return -ENOMEM;
@@ -506,12 +508,12 @@ ssize_t read_data_from_device(struct mx_pci_dev *mx_pdev,
 }
 
 ssize_t write_data_to_device(struct mx_pci_dev *mx_pdev,
-		const char __user *user_addr, size_t size, loff_t *fpos, int opcode)
+		const char __user *user_addr, size_t size, loff_t *fpos, int opcode, bool nowait)
 {
 	struct mx_transfer *transfer;
 	ssize_t ret;
 
-	transfer = alloc_mx_transfer((char __user *)user_addr, size, *fpos, DMA_TO_DEVICE);
+	transfer = alloc_mx_transfer((char __user *)user_addr, size, *fpos, DMA_TO_DEVICE, nowait);
 	if (!transfer) {
 		pr_warn("Failed to alloc mx_transfer\n");
 		return -ENOMEM;
@@ -525,12 +527,12 @@ ssize_t write_data_to_device(struct mx_pci_dev *mx_pdev,
 }
 
 ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev,
-		char __user *user_addr, size_t size, loff_t *fpos, int opcode)
+		char __user *user_addr, size_t size, loff_t *fpos, int opcode, bool nowait)
 {
 	struct mx_transfer *transfer;
 	ssize_t ret;
 
-	transfer = alloc_mx_transfer(user_addr, size, *fpos, DMA_FROM_DEVICE);
+	transfer = alloc_mx_transfer(user_addr, size, *fpos, DMA_FROM_DEVICE, nowait);
 	if (!transfer) {
 		pr_warn("Failed to alloc mx_transfer\n");
 		return -ENOMEM;
@@ -544,12 +546,12 @@ ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev,
 }
 
 ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev,
-		const char __user *user_addr, size_t size, loff_t *fpos, int opcode)
+		const char __user *user_addr, size_t size, loff_t *fpos, int opcode, bool nowait)
 {
 	struct mx_transfer *transfer;
 	ssize_t ret;
 
-	transfer = alloc_mx_transfer((char __user *)user_addr, size, *fpos, DMA_TO_DEVICE);
+	transfer = alloc_mx_transfer((char __user *)user_addr, size, *fpos, DMA_TO_DEVICE, nowait);
 	if (!transfer) {
 		pr_warn("Failed to alloc mx_transfer\n");
 		return -ENOMEM;
@@ -566,7 +568,7 @@ ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev,
 /* Functions for parallel fops                                                */
 /******************************************************************************/
 static struct mx_transfer **alloc_mx_transfer_parallel(void __user *user_addr, size_t total_size,
-		uint64_t device_addr, enum dma_data_direction dir, int pages_nr, int count)
+		uint64_t device_addr, enum dma_data_direction dir, int pages_nr, int count, bool nowait)
 {
 	struct mx_transfer **transfer;
 	int q, r;
@@ -589,7 +591,7 @@ static struct mx_transfer **alloc_mx_transfer_parallel(void __user *user_addr, s
 		uint64_t end_addr = ((uint64_t)user_addr + num * PAGE_SIZE) & PAGE_MASK;
 		size_t size = min_t(size_t, end_addr - (uint64_t)user_addr, total_size);
 
-		transfer[i] = alloc_mx_transfer(user_addr, size, device_addr, dir);
+		transfer[i] = alloc_mx_transfer(user_addr, size, device_addr, dir, nowait);
 		user_addr = (void __user *)((uint64_t)user_addr + size);
 		total_size -= size;
 		device_addr += size;
@@ -612,7 +614,7 @@ static void free_mx_transfer_parallel(struct mx_transfer **transfer, int count)
 }
 
 ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev,
-		char __user *buf, size_t size, loff_t *fpos, int opcode)
+		char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait)
 {
 	struct mx_transfer **transfer;
 	uint64_t first_page_index, last_page_index;
@@ -625,9 +627,9 @@ ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev,
 	count = min_t(int, nr_pages, parallel_count);
 
 	if (count == 1)
-		return read_data_from_device(mx_pdev, buf, size, fpos, opcode);
+		return read_data_from_device(mx_pdev, buf, size, fpos, opcode, nowait);
 
-	transfer = alloc_mx_transfer_parallel(buf, size, *fpos, DMA_FROM_DEVICE, nr_pages, count);
+	transfer = alloc_mx_transfer_parallel(buf, size, *fpos, DMA_FROM_DEVICE, nr_pages, count, nowait);
 	if (!transfer)
 		return -ENOMEM;
 
@@ -638,7 +640,7 @@ ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev,
 }
 
 ssize_t write_data_to_device_parallel(struct mx_pci_dev *mx_pdev,
-		const char __user *buf, size_t size, loff_t *fpos, int opcode)
+		const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait)
 {
 	struct mx_transfer **transfer;
 	uint64_t first_page_index, last_page_index;
@@ -651,9 +653,9 @@ ssize_t write_data_to_device_parallel(struct mx_pci_dev *mx_pdev,
 	count = min_t(int, nr_pages, parallel_count);
 
 	if (count == 1)
-		return write_data_to_device(mx_pdev, buf, size, fpos, opcode);
+		return write_data_to_device(mx_pdev, buf, size, fpos, opcode, nowait);
 
-	transfer = alloc_mx_transfer_parallel((char __user *)buf, size, *fpos, DMA_TO_DEVICE, nr_pages, count);
+	transfer = alloc_mx_transfer_parallel((char __user *)buf, size, *fpos, DMA_TO_DEVICE, nr_pages, count, nowait);
 	if (!transfer)
 		return -ENOMEM;
 
