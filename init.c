@@ -161,18 +161,18 @@ static int mx_engine_init(struct mx_engine *engine, void __iomem *bar, int dev_i
 	return 0;
 }
 
-static int create_mx_cdev(struct mx_pci_dev *mx_pdev, int type, dev_t dev_no, int dev_id)
+static int create_mx_cdev(struct mx_pci_dev *mx_pdev, int type)
 {
 	struct mx_char_dev *mx_cdev = &mx_pdev->mx_cdev[type];
 	struct device *dev;
 	int ret;
 
 	mx_cdev->magic = MAGIC_CHAR;
-	mx_cdev->cdev_no = MKDEV(MAJOR(dev_no), type);
-	mx_cdev->type = type;
+	mx_cdev->cdev_no = MKDEV(MAJOR(mx_pdev->dev_no), mx_pdev->num_of_cdev++);
+	mx_cdev->nowait = type >= MXDMA_TYPE_DATA_NOWAIT ? true : false;
 
-	cdev_init(&mx_cdev->cdev, &mxdma_fops);
-	kobject_set_name(&mx_cdev->cdev.kobj, node_name[type], dev_id);
+	cdev_init(&mx_cdev->cdev, mxdma_fops_array[type]);
+	kobject_set_name(&mx_cdev->cdev.kobj, node_name[type], mx_pdev->id);
 
 	ret = cdev_add(&mx_cdev->cdev, mx_cdev->cdev_no, 1);
 	if (ret) {
@@ -298,7 +298,7 @@ static int create_mx_pdev(struct pci_dev *pdev)
 	}
 
 	for (type = 0; type < NUM_OF_MXDMA_TYPE; type++) {
-		ret = create_mx_cdev(mx_pdev, type, mx_pdev->dev_no, mx_pdev->id);
+		ret = create_mx_cdev(mx_pdev, type);
 		if (ret) {
 			pr_err("Failed to create mx_cdev (%s) (err=%d)\n", node_name[type], ret);
 			goto out_fail;
