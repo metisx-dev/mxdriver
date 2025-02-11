@@ -13,6 +13,8 @@
 #include <linux/pci.h>
 #include <linux/aer.h>
 #include <linux/kthread.h>
+#include <linux/poll.h>
+#include <linux/spinlock.h>
 
 #include <asm/current.h>
 #include <asm/cacheflush.h>
@@ -47,6 +49,7 @@ enum {
 	MXDMA_TYPE_CONTEXT,
 	MXDMA_TYPE_SQ,
 	MXDMA_TYPE_CQ,
+	MXDMA_TYPE_EVENT,
 	NUM_OF_MXDMA_TYPE,
 };
 
@@ -76,6 +79,7 @@ static const char * const node_name[] = {
 	MXDMA_NODE_NAME "%d_context",
 	MXDMA_NODE_NAME "%d_sq",
 	MXDMA_NODE_NAME "%d_cq",
+	MXDMA_NODE_NAME "%d_event",
 };
 
 typedef union {
@@ -157,6 +161,12 @@ struct mx_engine {
 	struct mx_mbox complete;
 };
 
+struct mx_event {
+	int data;
+	spinlock_t lock;
+	wait_queue_head_t waitq;
+};
+
 struct mx_char_dev {
 	unsigned long magic;
 	struct mx_pci_dev *mx_pdev;
@@ -165,6 +175,8 @@ struct mx_char_dev {
 
 	int type;
 	bool enabled;
+
+	struct mx_event event;
 };
 
 struct mx_pci_dev {

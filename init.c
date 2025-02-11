@@ -8,16 +8,24 @@
 static struct class *mxdma_class;
 static DEFINE_IDA(dev_ids);
 
-static irqreturn_t top_half_handler(int irq, void *dev_id)
+static irqreturn_t top_half_handler(int irq, void *dev)
 {
-    pr_info("Top-half handler executed (IRQ: %d, dev_id: %p\n", irq, dev_id);
+    struct mx_pci_dev *mx_pdev = (struct mx_pci_dev *)dev;
+    struct mx_char_dev *cdev = &(mx_pdev->mx_cdev[MXDMA_TYPE_EVENT]);
+    unsigned long flags;
+    pr_info("Top-half handler executed (IRQ: %d, dev: %p\n", irq, dev);
+
+    spin_lock_irqsave(&cdev->event.lock, flags);
+    cdev->event.data = 1;
+    spin_unlock_irqrestore(&cdev->event.lock, flags);
+    wake_up_interruptible(&cdev->event.waitq);
 
     return IRQ_WAKE_THREAD;
 }
 
-static irqreturn_t bottom_half_thread_fn(int irq, void *dev_id)
+static irqreturn_t bottom_half_thread_fn(int irq, void *dev)
 {
-    pr_info("Bottom-half thread function executed (IRQ: %d, dev_id: %p)\n", irq, dev_id);
+    pr_info("Bottom-half thread function executed (IRQ: %d, dev: %p)\n", irq, dev);
 
     return IRQ_HANDLED;
 }
@@ -60,7 +68,7 @@ static int pci_device_init(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
 		int irq = pci_irq_vector(pdev, 0);
 		pr_info("MSI enabled, irq=%d\n", irq);
 
-		ret = request_threaded_irq(irq, top_half_handler, bottom_half_thread_fn, 0, MXDMA_NODE_NAME, NULL);
+		ret = request_threaded_irq(irq, top_half_handler, bottom_half_thread_fn, 0, MXDMA_NODE_NAME, mx_pdev);
 		if (ret) {
 			pr_err("Failed to request_threaded_irq (err=%d)\n", ret);
 			pci_disable_msi(pdev);
@@ -198,6 +206,9 @@ static int create_mx_cdev(struct mx_pci_dev *mx_pdev, int type, dev_t dev_no, in
 	mx_cdev->magic = MAGIC_CHAR;
 	mx_cdev->cdev_no = MKDEV(MAJOR(dev_no), type);
 	mx_cdev->type = type;
+	mx_cdev->event.data = 0;
+	spin_lock_init(&mx_cdev->event.lock);
+	init_waitqueue_head(&mx_cdev->event.waitq);
 
 	cdev_init(&mx_cdev->cdev, &mxdma_fops);
 	kobject_set_name(&mx_cdev->cdev.kobj, node_name[type], dev_id);
