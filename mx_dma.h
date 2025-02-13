@@ -162,7 +162,7 @@ struct mx_engine {
 };
 
 struct mx_event {
-	int data;
+	int32_t data;
 	spinlock_t lock;
 	wait_queue_head_t waitq;
 };

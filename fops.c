@@ -102,13 +102,15 @@ static ssize_t mxdma_device_read(struct file *file, char __user *buf, size_t cou
 	case MXDMA_TYPE_EVENT:
 		unsigned long flags;
 		int ret;
-		wait_event_interruptible(mx_cdev->event.waitq, mx_cdev->event.data);
+		if (count != sizeof(int32_t))
+			return -EINVAL;
 		spin_lock_irqsave(&mx_cdev->event.lock, flags);
-		ret = copy_to_user(buf, &mx_cdev->event.data, sizeof(int));
+		ret = copy_to_user(buf, &mx_cdev->event.data, count);
 		mx_cdev->event.data = 0;
 		spin_unlock_irqrestore(&mx_cdev->event.lock, flags);
 		if(ret)
 			return -EFAULT;
+		pr_info("read event_data=%d\n", mx_cdev->event.data);
 		break;
 	default:
 		break;
@@ -177,7 +179,17 @@ static ssize_t mxdma_device_write(struct file *file, const char __user *buf, siz
 			return -EINVAL;
 		break;
 	case MXDMA_TYPE_EVENT:
-		return -EINVAL;
+		unsigned long flags;
+		int ret;
+		if (count != sizeof(int32_t))
+			return -EINVAL;
+		pr_info("write event_data=%d\n", *(int32_t *)buf);
+		spin_lock_irqsave(&mx_cdev->event.lock, flags);
+		ret = copy_from_user(&mx_cdev->event.data, buf, count);
+		spin_unlock_irqrestore(&mx_cdev->event.lock, flags);
+		wake_up_interruptible(&mx_cdev->event.waitq);
+		if(ret)
+			return -EFAULT;
 		break;
 	default:
 		break;
@@ -226,13 +238,13 @@ static unsigned int mxdma_device_poll(struct file *file, poll_table *wait)
     }
 
 	poll_wait(file, &mx_cdev->event.waitq, wait);
+	
 	spin_lock_irqsave(&mx_cdev->event.lock, flags);
 	event_data = mx_cdev->event.data;
-	mx_cdev->event.data = 0;
 	spin_unlock_irqrestore(&mx_cdev->event.lock, flags);
 
 	if(event_data) {
-		mask = POLLIN | POLLRDNORM;
+		mask |= POLLRDNORM | POLLIN;
 	}
 
 	return mask;

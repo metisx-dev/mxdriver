@@ -18,3 +18,7 @@ sed -i '/cxl_/d' /etc/modules
 sed -i '/mx_dma/d' /etc/modules
 find "$mx_dma_dir" -type f -name "*.ko" >> /etc/modules
 
+rmmod cxl_pci mx_dma
+modprobe -a mx_dma cxl_acpi cxl_core cxl_pci cxl_port cxl_mem cxl_pmem
+
+sync
