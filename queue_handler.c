@@ -156,12 +156,13 @@ int mx_command_submit_handler(void *arg)
 			list_del(&transfer->entry);
 			spin_unlock_irqrestore(&sq_mbox->lock, flags);
 
-			atomic_inc(&wait_count);
 			push_mx_command(sq_mbox, &transfer->cmd);
 
 			if (transfer->nowait) {
 				transfer->cmd.control = MXDMA_TRANSFER_COMPLETE;
 				complete(&transfer->done);
+			} else {
+				atomic_inc(&wait_count);
 			}
 		} else {
 			msleep(SQ_POLLING_MSEC);
