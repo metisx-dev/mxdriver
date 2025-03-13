@@ -7,22 +7,44 @@
 /******************************************************************************/
 static struct class *mxdma_class;
 
-static irqreturn_t top_half_handler(int irq, void *dev_id)
+static void mx_event_init(struct mx_pci_dev *mx_pdev)
 {
-    pr_info("Top-half handler executed (IRQ: %d, dev_id: %p\n", irq, dev_id);
+	struct mx_event *mx_event = &mx_pdev->event;
 
-    return IRQ_WAKE_THREAD;
+	init_waitqueue_head(&mx_event->wq);
+	atomic_set(&mx_event->flag, 0);
 }
 
-static irqreturn_t bottom_half_thread_fn(int irq, void *dev_id)
+static irqreturn_t msi_irq_handler(int irq, void *data)
 {
-    pr_info("Bottom-half thread function executed (IRQ: %d, dev_id: %p)\n", irq, dev_id);
+    struct mx_pci_dev *mx_pdev;
+    struct mx_event *mx_event;
 
+    mx_pdev = (struct mx_pci_dev *)data;
+    if (mx_pdev == NULL) {
+	pr_err("Invalid data\n");
+	goto out;
+    }
+
+    mx_event = &(mx_pdev->event);
+    if (mx_event == NULL) {
+	pr_err("Invalid event\n");
+	goto out;
+    }
+
+    atomic_set(&mx_event->flag, 1);
+    wake_up_interruptible(&mx_event->wq);
+
+out:
     return IRQ_HANDLED;
 }
 
 static void pci_device_exit(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
 {
+	int irq = pci_irq_vector(pdev, 0);
+
+	free_irq(irq, NULL);
+
 	if (mx_pdev->has_regions)
 		pci_release_region(pdev, HMBOX_BAR_INDEX);
 }
@@ -59,7 +81,9 @@ static int pci_device_init(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
 		int irq = pci_irq_vector(pdev, 0);
 		pr_info("MSI enabled, irq=%d\n", irq);
 
-		ret = request_threaded_irq(irq, top_half_handler, bottom_half_thread_fn, 0, MXDMA_NODE_NAME, NULL);
+		mx_event_init(mx_pdev);
+
+		ret = request_threaded_irq(irq, msi_irq_handler, NULL, 0, MXDMA_NODE_NAME, mx_pdev);
 		if (ret) {
 			pr_err("Failed to request_threaded_irq (err=%d)\n", ret);
 			pci_disable_msi(pdev);
@@ -188,6 +212,13 @@ static int mx_engine_init(struct mx_engine *engine, void __iomem *bar, int dev_i
 	return 0;
 }
 
+static bool is_nowait_type(int type)
+{
+	if (type >= MXDMA_TYPE_DATA_NOWAIT && type <= MXDMA_TYPE_CQ_NOWAIT)
+		return true;
+	return false;
+}
+
 static int create_mx_cdev(struct mx_pci_dev *mx_pdev, int type)
 {
 	struct mx_char_dev *mx_cdev = &mx_pdev->mx_cdev[type];
@@ -196,7 +227,7 @@ static int create_mx_cdev(struct mx_pci_dev *mx_pdev, int type)
 
 	mx_cdev->magic = MAGIC_CHAR;
 	mx_cdev->cdev_no = MKDEV(MAJOR(mx_pdev->dev_no), mx_pdev->num_of_cdev++);
-	mx_cdev->nowait = type >= MXDMA_TYPE_DATA_NOWAIT ? true : false;
+	mx_cdev->nowait = is_nowait_type(type);
 
 	cdev_init(&mx_cdev->cdev, mxdma_fops_array[type]);
 	kobject_set_name(&mx_cdev->cdev.kobj, node_name[type], mx_pdev->id);
@@ -321,6 +352,8 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 		pr_err("Failed to set_dma_addressing (err=%d)\n", ret);
 		goto out_fail;
 	}
+
+	mx_event_init(mx_pdev);
 
 	for (type = 0; type < NUM_OF_MXDMA_TYPE; type++) {
 		ret = create_mx_cdev(mx_pdev, type);
