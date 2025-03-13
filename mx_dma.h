@@ -13,6 +13,7 @@
 #include <linux/pci.h>
 #include <linux/aer.h>
 #include <linux/kthread.h>
+#include <linux/poll.h>
 
 #include <asm/current.h>
 #include <asm/cacheflush.h>
@@ -51,6 +52,7 @@ enum {
 	MXDMA_TYPE_CONTEXT_NOWAIT,
 	MXDMA_TYPE_SQ_NOWAIT,
 	MXDMA_TYPE_CQ_NOWAIT,
+	MXDMA_TYPE_EVENT,
 	NUM_OF_MXDMA_TYPE,
 };
 
@@ -84,6 +86,7 @@ static const char * const node_name[] = {
 	MXDMA_NODE_NAME "%d_context_nowait",
 	MXDMA_NODE_NAME "%d_sq_nowait",
 	MXDMA_NODE_NAME "%d_cq_nowait",
+	MXDMA_NODE_NAME "%d_event",
 };
 
 typedef union {
@@ -178,6 +181,11 @@ struct mx_char_dev {
 	bool enabled;
 };
 
+struct mx_event {
+	atomic_t flag;
+	wait_queue_head_t wq;
+};
+
 struct mx_pci_dev {
 	unsigned long magic;
 	int id;
@@ -189,6 +197,8 @@ struct mx_pci_dev {
 
 	void __iomem *hmbox_bar;
 	uint32_t hmbox_size;
+
+	struct mx_event event;
 
 	struct mx_engine engine;
 
