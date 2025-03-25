@@ -6,7 +6,6 @@
 /* Initialization                                                             */
 /******************************************************************************/
 static struct class *mxdma_class;
-static DEFINE_IDA(dev_ids);
 
 static void pci_device_exit(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
 {
@@ -251,11 +250,9 @@ static void destroy_mx_pdev(struct pci_dev *pdev)
 	unregister_chrdev_region(mx_pdev->dev_no, NUM_OF_MXDMA_TYPE);
 	devm_kfree(&pdev->dev, mx_pdev);
 	dev_set_drvdata(&pdev->dev, NULL);
-
-	ida_free(&dev_ids, mx_pdev->id);
 }
 
-static int create_mx_pdev(struct pci_dev *pdev)
+static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 {
 	struct mx_pci_dev *mx_pdev;
 	int type;
@@ -271,7 +268,7 @@ static int create_mx_pdev(struct pci_dev *pdev)
 
 	mx_pdev->magic = MAGIC_DEVICE;
 	mx_pdev->pdev = pdev;
-	mx_pdev->id = ida_alloc(&dev_ids, GFP_KERNEL);
+	mx_pdev->id = cxl_memdev_id;
 
 	ret = alloc_chrdev_region(&mx_pdev->dev_no, 0, NUM_OF_MXDMA_TYPE, MXDMA_NODE_NAME);
 	if (ret) {
@@ -321,17 +318,18 @@ out_fail:
 	return ret;
 }
 
-int mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+int mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id, int cxl_memdev_id)
 {
 	int ret;
 
-	ret = create_mx_pdev(pdev);
+	ret = create_mx_pdev(pdev, cxl_memdev_id);
 	if (ret) {
 		pr_err("Failed to create_mx_pdev\n");
 		return ret;
 	}
 
-	pr_info("pci device is probed (vendor=%#x device=%#x)\n", pdev->vendor, pdev->device);
+	pr_info("pci device is probed (vendor=%#x device=%#x bdf=%s cxl=mem%d)\n",
+		pdev->vendor, pdev->device, dev_name(&pdev->dev), cxl_memdev_id);
 
 	return 0;
 }
