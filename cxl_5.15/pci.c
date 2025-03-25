@@ -1477,7 +1477,7 @@ static int cxl_mem_create_range_info(struct cxl_mem *cxlm)
 	return 0;
 }
 
-extern int mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id);
+extern int mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id, int cxl_memdev_id);
 extern void mxdma_driver_remove(struct pci_dev *pdev);
 
 static int cxl_mem_probe(struct pci_dev *pdev, const struct pci_device_id *id)
@@ -1521,7 +1521,7 @@ static int cxl_mem_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (range_len(&cxlm->pmem_range) && IS_ENABLED(CONFIG_CXL_PMEM))
 		rc = devm_cxl_add_nvdimm(&pdev->dev, cxlmd);
 
-	mxdma_driver_probe(pdev, id);
+	mxdma_driver_probe(pdev, id, cxlmd->id);
 
 	return rc;
 }

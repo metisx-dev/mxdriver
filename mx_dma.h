@@ -198,7 +198,7 @@ struct mx_pci_dev {
 
 extern struct file_operations *mxdma_fops_array[];
 
-int mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id);
+int mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id, int cxl_memdev_id);
 void mxdma_driver_remove(struct pci_dev *pdev);
 
 int transfer_id_alloc(void *ptr);

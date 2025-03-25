@@ -786,7 +786,7 @@ static int cxl_event_config(struct pci_host_bridge *host_bridge,
 	return 0;
 }
 
-extern int mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id);
+extern int mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id, int cxl_memdev_id);
 extern void mxdma_driver_remove(struct pci_dev *pdev);
 
 static int cxl_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
@@ -926,7 +926,7 @@ static int cxl_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	pci_save_state(pdev);
 
-	mxdma_driver_probe(pdev, id);
+	mxdma_driver_probe(pdev, id, cxlmd->id);
 
 	return rc;
 }
