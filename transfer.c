@@ -304,7 +304,9 @@ static int mx_transfer_init_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *t
 static void mx_transfer_destroy_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
 	struct device *dev = &mx_pdev->pdev->dev;
+	struct mx_command *comm = &transfer->cmd;
 
+	transfer_id_free(comm->id);
 	desc_list_free(dev, transfer);
 	unmap_user_addr_to_sg(dev, transfer);
 }
@@ -381,8 +383,6 @@ static int mx_transfer_wait(struct mx_engine *engine, struct mx_transfer *transf
 		pr_warn("mx_transfer doesn't work properly. control=%d", transfer->cmd.control);
 		ret = -EIO;
 	}
-
-	transfer_id_free(comm->id);
 
 	return ret;
 }
