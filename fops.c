@@ -108,7 +108,7 @@ static ssize_t mxdma_device_read_context(struct file *file, char __user *buf, si
 	return read_data_from_device(mx_pdev, buf, count, pos, MXDMA_OP_CONTEXT_READ, mx_cdev->nowait);
 }
 
-static ssize_t mxdma_device_read_sq(struct file *file, char __user *buf, size_t count, loff_t *pos)
+static ssize_t mxdma_device_read_doorbell(struct file *file, char __user *buf, size_t count, loff_t *pos, int opcode)
 {
 	struct mx_char_dev *mx_cdev;
 	struct mx_pci_dev *mx_pdev;
@@ -124,30 +124,19 @@ static ssize_t mxdma_device_read_sq(struct file *file, char __user *buf, size_t 
 		return ret;
 
 	if (count <= sizeof(uint64_t))
-		return read_ctrl_from_device(mx_pdev, buf, count, pos, MXDMA_OP_SQ_READ, mx_cdev->nowait);
+		return read_ctrl_from_device(mx_pdev, buf, count, pos, opcode, mx_cdev->nowait);
 	else
 		return -EINVAL;
 }
 
+static ssize_t mxdma_device_read_sq(struct file *file, char __user *buf, size_t count, loff_t *pos)
+{
+	return mxdma_device_read_doorbell(file, buf, count, pos, MXDMA_OP_SQ_READ);
+}
+
 static ssize_t mxdma_device_read_cq(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
-	struct mx_char_dev *mx_cdev;
-	struct mx_pci_dev *mx_pdev;
-	int ret;
-
-	if (!count) {
-		pr_warn("size of data to read is zero\n");
-		return -EINVAL;
-	}
-
-	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
-	if (ret)
-		return ret;
-
-	if (count <= sizeof(uint64_t))
-		return read_ctrl_from_device(mx_pdev, buf, count, pos, MXDMA_OP_CQ_READ, mx_cdev->nowait);
-	else
-		return -EINVAL;
+	return mxdma_device_read_doorbell(file, buf, count, pos, MXDMA_OP_CQ_READ);
 }
 
 static ssize_t mxdma_device_write_data(struct file *file, const char __user *buf, size_t count, loff_t *pos)
@@ -186,7 +175,7 @@ static ssize_t mxdma_device_write_context(struct file *file, const char __user *
 	return write_data_to_device(mx_pdev, buf, count, pos, MXDMA_OP_CONTEXT_WRITE, mx_cdev->nowait);
 }
 
-static ssize_t mxdma_device_write_sq(struct file *file, const char __user *buf, size_t count, loff_t *pos)
+static ssize_t mxdma_device_write_doorbell(struct file *file, const char __user *buf, size_t count, loff_t *pos, int opcode)
 {
 	struct mx_char_dev *mx_cdev;
 	struct mx_pci_dev *mx_pdev;
@@ -202,30 +191,19 @@ static ssize_t mxdma_device_write_sq(struct file *file, const char __user *buf, 
 		return ret;
 
 	if (count <= sizeof(uint64_t))
-		return write_ctrl_to_device(mx_pdev, buf, count, pos, MXDMA_OP_SQ_WRITE, mx_cdev->nowait);
+		return write_ctrl_to_device(mx_pdev, buf, count, pos, opcode, mx_cdev->nowait);
 	else
 		return -EINVAL;
 }
 
+static ssize_t mxdma_device_write_sq(struct file *file, const char __user *buf, size_t count, loff_t *pos)
+{
+	return mxdma_device_write_doorbell(file, buf, count, pos, MXDMA_OP_SQ_WRITE);
+}
+
 static ssize_t mxdma_device_write_cq(struct file *file, const char __user *buf, size_t count, loff_t *pos)
 {
-	struct mx_char_dev *mx_cdev;
-	struct mx_pci_dev *mx_pdev;
-	int ret;
-
-	if (!count) {
-		pr_warn("size of data to write is zero\n");
-		return -EINVAL;
-	}
-
-	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
-	if (ret)
-		return ret;
-
-	if (count <= sizeof(uint64_t))
-		return write_ctrl_to_device(mx_pdev, buf, count, pos, MXDMA_OP_CQ_WRITE, mx_cdev->nowait);
-	else
-		return -EINVAL;
+	return mxdma_device_write_doorbell(file, buf, count, pos, MXDMA_OP_CQ_WRITE);
 }
 
 static unsigned int mxdma_device_poll(struct file *file, poll_table *wait)
