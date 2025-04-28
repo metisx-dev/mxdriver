@@ -105,10 +105,7 @@ static ssize_t mxdma_device_read_context(struct file *file, char __user *buf, si
 	if (ret)
 		return ret;
 
-	if (count >= sizeof(uint64_t))
-		return read_data_from_device(mx_pdev, buf, count, pos, MXDMA_OP_CONTEXT_READ, mx_cdev->nowait);
-	else
-		return read_ctrl_from_device(mx_pdev, buf, count, pos, MXDMA_OP_CONTEXT_READ, mx_cdev->nowait);
+	return read_data_from_device(mx_pdev, buf, count, pos, MXDMA_OP_CONTEXT_READ, mx_cdev->nowait);
 }
 
 static ssize_t mxdma_device_read_sq(struct file *file, char __user *buf, size_t count, loff_t *pos)
@@ -186,10 +183,7 @@ static ssize_t mxdma_device_write_context(struct file *file, const char __user *
 	if (ret)
 		return ret;
 
-	if (count >= sizeof(uint64_t))
-		return write_data_to_device(mx_pdev, buf, count, pos, MXDMA_OP_CONTEXT_WRITE, mx_cdev->nowait);
-	else
-		return write_ctrl_to_device(mx_pdev, buf, count, pos, MXDMA_OP_CONTEXT_WRITE, mx_cdev->nowait);
+	return write_data_to_device(mx_pdev, buf, count, pos, MXDMA_OP_CONTEXT_WRITE, mx_cdev->nowait);
 }
 
 static ssize_t mxdma_device_write_sq(struct file *file, const char __user *buf, size_t count, loff_t *pos)
