@@ -252,6 +252,24 @@ static unsigned int mxdma_device_poll(struct file *file, poll_table *wait)
 	return mask;
 }
 
+static ssize_t mxdma_device_clear(struct file *file, const char __user *buf, size_t count, loff_t *pos)
+{
+	struct mx_char_dev *mx_cdev;
+	struct mx_pci_dev *mx_pdev;
+	int ret;
+
+	if (!count) {
+		pr_warn("size of data to write is zero\n");
+		return -EINVAL;
+	}
+
+	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
+	if (ret)
+		return ret;
+
+	return replicate_data_to_device(mx_pdev, buf, count, pos);
+}
+
 struct file_operations mxdma_fops_data = {
 	.open = mxdma_device_open,
 	.release = mxdma_device_release,
@@ -286,6 +304,12 @@ struct file_operations mxdma_fops_event = {
 	.poll = mxdma_device_poll,
 };
 
+struct file_operations mxdma_fops_clear = {
+	.open = mxdma_device_open,
+	.release = mxdma_device_release,
+	.write = mxdma_device_clear,
+};
+
 struct file_operations *mxdma_fops_array[] = {
 	[MXDMA_TYPE_DATA] = &mxdma_fops_data,
 	[MXDMA_TYPE_CONTEXT] = &mxdma_fops_context,
@@ -296,5 +320,6 @@ struct file_operations *mxdma_fops_array[] = {
 	[MXDMA_TYPE_SQ_NOWAIT] = &mxdma_fops_sq,
 	[MXDMA_TYPE_CQ_NOWAIT] = &mxdma_fops_cq,
 	[MXDMA_TYPE_EVENT] = &mxdma_fops_event,
+	[MXDMA_TYPE_CLEAR] = &mxdma_fops_clear,
 };
 

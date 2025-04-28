@@ -122,6 +122,45 @@ static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
 	return transfer->desc_list_ba[0];
 }
 
+static uint64_t desc_list_init_repl(struct device *dev, struct mx_transfer *transfer, dma_addr_t bus_addr)
+{
+	int total_desc_cnt;
+	int list_cnt, list_idx;
+	int ret;
+
+	total_desc_cnt = (transfer->size + SINGLE_DMA_SIZE - 1) / SINGLE_DMA_SIZE;
+
+	list_cnt = 1;
+	while (total_desc_cnt > NUM_OF_DESC_PER_LIST) {
+		total_desc_cnt -= (NUM_OF_DESC_PER_LIST - 1);
+		list_cnt++;
+	}
+
+	ret = desc_list_alloc(dev, transfer, list_cnt);
+	if (ret) {
+		pr_warn("Failed to desc_list_alloc (err=%d)\n", ret);
+		return 0;
+	}
+
+	for (list_idx = 0; list_idx < list_cnt; list_idx++)
+	{
+		uint64_t *desc = (uint64_t *)transfer->desc_list_va[list_idx];
+		int desc_idx;
+
+		for (desc_idx = 0; desc_idx < NUM_OF_DESC_PER_LIST - 1; desc_idx++) {
+			desc[desc_idx] = bus_addr;
+		}
+
+		if (list_idx < list_cnt - 1) {
+			desc[desc_idx] = (uint64_t)transfer->desc_list_ba[list_idx + 1];
+		} else {
+			desc[desc_idx] = bus_addr;
+		}
+	}
+
+	return transfer->desc_list_ba[0];
+}
+
 static ssize_t sg_set_pages(struct scatterlist *sg, struct page **pages, int pages_nr,
 		ssize_t size, void __user *user_addr)
 {
@@ -311,6 +350,7 @@ static void mx_transfer_destroy_sg(struct mx_pci_dev *mx_pdev, struct mx_transfe
 	unmap_user_addr_to_sg(dev, transfer);
 }
 
+
 static int mx_transfer_init_ctrl(struct mx_transfer *transfer, int opcode)
 {
 	uint64_t value = 0;
@@ -354,6 +394,74 @@ static int mx_transfer_destroy_ctrl(struct mx_transfer *transfer)
 		pr_warn("Failed to copy_to_user (err=%d)\n", ret);
 
 	return ret;
+}
+
+static int mx_command_init_repl(struct device *dev, struct mx_transfer *transfer)
+{
+	struct mx_command *cmd = &transfer->cmd;
+	void *cpu_addr;
+	dma_addr_t bus_addr;
+	uint8_t value;
+	int ret;
+
+	ret = copy_from_user(&value, transfer->user_addr, sizeof(uint8_t));
+	if (ret) {
+		pr_warn("Failed to copy_from_user (err=%d)\n", ret);
+		return ret;
+	}
+
+	cpu_addr = dma_alloc_coherent(dev, SINGLE_DMA_SIZE, &bus_addr, GFP_KERNEL);
+	if (!cpu_addr) {
+		pr_warn("Failed to dma_alloc_coherent (err=%d)\n", ret);
+		return ret;
+	}
+
+
+	memset(cpu_addr, value, SINGLE_DMA_SIZE);
+
+	if (transfer->size <= SINGLE_DMA_SIZE) {
+		cmd->page_mode = MXDMA_PAGE_MODE_SINGLE;
+		cmd->host_addr = bus_addr;
+	} else {
+		cmd->page_mode = MXDMA_PAGE_MODE_MULTI;
+		cmd->host_addr = desc_list_init_repl(dev, transfer, bus_addr);
+	}
+
+	if (!cmd->host_addr) {
+		pr_warn("Failed to get sg_dma_address\n");
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
+static int mx_transfer_init_repl(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
+{
+	struct device *dev = &mx_pdev->pdev->dev;
+	int ret;
+
+	ret = mx_command_init_common(transfer, MXDMA_OP_DATA_WRITE);
+	if (ret) {
+		pr_warn("Failed to init mx_command for common (err=%d)\n", ret);
+		return ret;
+	}
+
+	ret = mx_command_init_repl(dev, transfer);
+	if (ret) {
+		pr_warn("Failed to init mx_command for sg (err=%d)\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static void mx_transfer_destroy_repl(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
+{
+	struct device *dev = &mx_pdev->pdev->dev;
+	struct mx_command *comm = &transfer->cmd;
+
+	transfer_id_free(comm->id);
+	desc_list_free(dev, transfer);
 }
 
 static void mx_transfer_queue(struct mx_engine *engine, struct mx_transfer *transfer)
@@ -466,6 +574,27 @@ static ssize_t mx_transfer_submit_ctrl(struct mx_pci_dev *mx_pdev,
 	return transfer->size;
 }
 
+static ssize_t mx_transfer_submit_repl(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
+{
+	ssize_t ret;
+
+	ret = mx_transfer_init_repl(mx_pdev, transfer);
+	if (ret < 0) {
+		pr_warn("Failed to init mx_transfer (err=%ld)\n", ret);
+		goto out;
+	}
+
+	mx_transfer_queue(&mx_pdev->engine, transfer);
+	ret = mx_transfer_wait(&mx_pdev->engine, transfer);
+	if (ret < 0)
+		pr_warn("Failed to wait mx_transfer (err=%ld)\n", ret);
+
+out:
+	mx_transfer_destroy_repl(mx_pdev, transfer);
+
+	return ret;
+}
+
 /******************************************************************************/
 /* Functions for fops                                                         */
 /******************************************************************************/
@@ -558,6 +687,25 @@ ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev,
 	}
 
 	ret = mx_transfer_submit_ctrl(mx_pdev, transfer, opcode);
+
+	kfree(transfer);
+
+	return ret;
+}
+
+ssize_t replicate_data_to_device(struct mx_pci_dev *mx_pdev,
+		const char __user *user_addr, size_t size, loff_t *fpos)
+{
+	struct mx_transfer *transfer;
+	ssize_t ret;
+
+	transfer = alloc_mx_transfer((char __user *)user_addr, size, *fpos, DMA_TO_DEVICE, false);
+	if (!transfer) {
+		pr_warn("Failed to alloc mx_transfer\n");
+		return -ENOMEM;
+	}
+
+	ret = mx_transfer_submit_repl(mx_pdev, transfer);
 
 	kfree(transfer);
 

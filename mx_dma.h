@@ -53,6 +53,7 @@ enum {
 	MXDMA_TYPE_SQ_NOWAIT,
 	MXDMA_TYPE_CQ_NOWAIT,
 	MXDMA_TYPE_EVENT,
+	MXDMA_TYPE_CLEAR,
 	NUM_OF_MXDMA_TYPE,
 };
 
@@ -87,6 +88,7 @@ static const char * const node_name[] = {
 	MXDMA_NODE_NAME "%d_sq_nowait",
 	MXDMA_NODE_NAME "%d_cq_nowait",
 	MXDMA_NODE_NAME "%d_event",
+	MXDMA_NODE_NAME "%d_clear",
 };
 
 typedef union {
@@ -223,6 +225,8 @@ ssize_t write_data_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf,
 
 ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
 ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
+
+ssize_t replicate_data_to_device(struct mx_pci_dev *mx_pdev, const char __user *user_addr, size_t size, loff_t *fpos);
 
 int mx_command_submit_handler(void *arg);
 int mx_command_complete_handler(void *arg);
