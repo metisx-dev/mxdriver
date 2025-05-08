@@ -17,26 +17,26 @@ static void mx_event_init(struct mx_pci_dev *mx_pdev)
 
 static irqreturn_t msi_irq_handler(int irq, void *data)
 {
-    struct mx_pci_dev *mx_pdev;
-    struct mx_event *mx_event;
+	struct mx_pci_dev *mx_pdev;
+	struct mx_event *mx_event;
 
-    mx_pdev = (struct mx_pci_dev *)data;
-    if (mx_pdev == NULL) {
-	pr_err("Invalid data\n");
-	goto out;
-    }
+	mx_pdev = (struct mx_pci_dev *)data;
+	if (mx_pdev == NULL) {
+		pr_err("Invalid data\n");
+		goto out;
+	}
 
-    mx_event = &(mx_pdev->event);
-    if (mx_event == NULL) {
-	pr_err("Invalid event\n");
-	goto out;
-    }
+	mx_event = &(mx_pdev->event);
+	if (mx_event == NULL) {
+		pr_err("Invalid event\n");
+		goto out;
+	}
 
-    atomic_set(&mx_event->flag, 1);
-    wake_up_interruptible(&mx_event->wq);
+	atomic_inc(&mx_event->count);
+	wake_up_interruptible(&mx_event->wq);
 
 out:
-    return IRQ_HANDLED;
+	return IRQ_HANDLED;
 }
 
 static void pci_device_exit(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
@@ -390,7 +390,7 @@ int mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id, int
 	}
 
 	pr_info("pci device is probed (vendor=%#x device=%#x bdf=%s cxl=mem%d)\n",
-		pdev->vendor, pdev->device, dev_name(&pdev->dev), cxl_memdev_id);
+			pdev->vendor, pdev->device, dev_name(&pdev->dev), cxl_memdev_id);
 
 	return 0;
 }
