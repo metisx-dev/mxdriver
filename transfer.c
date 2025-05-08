@@ -235,7 +235,7 @@ static int mx_command_init_common(struct mx_transfer *transfer, int opcode)
 
 	id = transfer_id_alloc(transfer);
 	if (id < 0) {
-		pr_warn("Failed to trasfer_id_alloc\n");
+		pr_warn("Failed to trasfer_id_alloc (err=%d)\n", id);
 		return -ENOMEM;
 	}
 
@@ -342,8 +342,11 @@ static int mx_transfer_init_ctrl(struct mx_transfer *transfer, int opcode)
 
 static int mx_transfer_destroy_ctrl(struct mx_transfer *transfer)
 {
+	struct mx_command *comm = &transfer->cmd;
 	uint64_t value;
 	int ret;
+
+	transfer_id_free(comm->id);
 
 	if (transfer->dir != DMA_FROM_DEVICE)
 		return 0;
