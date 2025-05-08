@@ -182,7 +182,7 @@ struct mx_char_dev {
 };
 
 struct mx_event {
-	atomic_t flag;
+	atomic_t count;
 	wait_queue_head_t wq;
 };
 

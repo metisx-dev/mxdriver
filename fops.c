@@ -240,7 +240,7 @@ static unsigned int mxdma_device_poll(struct file *file, poll_table *wait)
 	struct mx_pci_dev *mx_pdev;
 	struct mx_event *mx_event;
 	unsigned int mask = 0;
-	int flag;
+	int count;
 
 	mx_cdev = (struct mx_char_dev *)file->private_data;
 	if (!mx_cdev) {
@@ -271,11 +271,11 @@ static unsigned int mxdma_device_poll(struct file *file, poll_table *wait)
 
 	mx_event = &mx_pdev->event;
 	poll_wait(file, &mx_event->wq, wait);
-	flag = atomic_read(&mx_event->flag);
-	if (flag) {
+	count = atomic_read(&mx_event->count);
+	if (count > 0) {
+		atomic_dec(&mx_event->count);
 		mask = POLLIN | POLLRDNORM;
 	}
-	atomic_set(&mx_event->flag, 0);
 
 	return mask;
 }

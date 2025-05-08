@@ -12,7 +12,7 @@ static void mx_event_init(struct mx_pci_dev *mx_pdev)
 	struct mx_event *mx_event = &mx_pdev->event;
 
 	init_waitqueue_head(&mx_event->wq);
-	atomic_set(&mx_event->flag, 0);
+	atomic_set(&mx_event->count, 0);
 }
 
 static irqreturn_t msi_irq_handler(int irq, void *data)
