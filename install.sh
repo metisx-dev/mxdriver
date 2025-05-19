@@ -1,7 +1,8 @@
 #!/bin/bash
-#
+
 make clean
-make install -j`nproc`
+make install -j$(nproc)
+depmod -a
 
 kernel_version=$(uname -r)
 mx_dma_path=$(find /lib/modules/${kernel_version}/ -type f -name "mx_dma.ko" 2>/dev/null)
@@ -16,5 +17,4 @@ fi
 
 sed -i '/cxl_/d' /etc/modules
 sed -i '/mx_dma/d' /etc/modules
-find "$mx_dma_dir" -type f -name "*.ko" >> /etc/modules
-
+find "$mx_dma_dir" -type f -name "*.ko" >>/etc/modules
