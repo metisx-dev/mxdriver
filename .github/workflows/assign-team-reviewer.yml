@@ -1,0 +1,16 @@
+name: Assign Team Reviewers
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  
+jobs:
+  assign-reviewers:
+      uses: metisx-dev/.github/.github/workflows/assign-team-reviewers.yml@main
+      with:
+        org: metisx-dev
+        team_slug: framework_c
+        repository_name: ${{ github.event.repository.name }}
+        pull_request_number: ${{ github.event.pull_request.number }}
+      secrets:
+        PAT_TOKEN: ${{ secrets.METISX_GIT_ACTION_ACCESS_TOKEN }}

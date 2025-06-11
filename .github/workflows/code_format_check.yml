@@ -1,0 +1,13 @@
+name: Code Style
+
+on:
+  pull_request:
+
+jobs:
+  clang-format:
+    uses: metisx-dev/.github/.github/workflows/clang-format-ci.yml@main
+    with:
+      working_directory: '.'
+      fail_on_error: true
+    secrets:
+      PAT_TOKEN: ${{ secrets.METISX_GIT_ACTION_ACCESS_TOKEN }}

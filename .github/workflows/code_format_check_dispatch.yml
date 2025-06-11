@@ -1,0 +1,38 @@
+# This workflow is triggered manually and calls another reusable workflow
+name: Trigger clang-format
+
+on:
+  workflow_dispatch:
+    inputs:
+      working_directory:
+        description: 'working directory - default is current directory'
+        required: true
+        default: '.'
+        type: string
+      auto_commit:
+        description: '자동 커밋 여부 - true or false'
+        required: true
+        default: 'true'
+        type: boolean
+      format_scope:
+        description: '포맷팅 범위 - all or default'
+        required: true
+        default: 'default'
+        type: string
+      branch_name:
+        description: '브랜치 이름 - default is current branch'
+        required: true
+        default: 'main'
+        type: string
+
+jobs:
+  call-reusable:
+    uses: metisx-dev/.github/.github/workflows/clang-format-ci.yml@main
+    with:
+      working_directory: ${{ inputs.working_directory }}
+      auto_commit: ${{ inputs.auto_commit }}
+      format_scope: ${{ inputs.format_scope }}
+      branch_name: ${{ inputs.branch_name }}
+      fail_on_error: true
+    secrets:
+      PAT_TOKEN: ${{ secrets.METISX_GIT_ACTION_ACCESS_TOKEN }}
