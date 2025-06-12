@@ -1104,6 +1104,14 @@ static int cxl_mem_setup_regs(struct cxl_mem *cxlm)
 	struct cxl_register_map *map, maps[CXL_REGLOC_RBI_TYPES];
 	int ret = 0;
 
+	int dvsec;
+	u16 ctrl;
+
+	dvsec = cxl_mem_dvsec(pdev, 0);
+	pci_read_config_word(pdev, dvsec + 0xC, &ctrl);
+	ctrl |= (1 << 2);
+	pci_write_config_word(pdev, dvsec + 0xC, ctrl);
+
 	regloc = cxl_mem_dvsec(pdev, PCI_DVSEC_ID_CXL_REGLOC_DVSEC_ID);
 	if (!regloc) {
 		dev_err(dev, "register location dvsec not found\n");
@@ -1489,6 +1497,9 @@ static int cxl_mem_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	rc = pcim_enable_device(pdev);
 	if (rc)
 		return rc;
+
+	if (!pdev->is_busmaster)
+		pci_set_master(pdev);
 
 	cxlm = cxl_mem_create(pdev);
 	if (IS_ERR(cxlm))
