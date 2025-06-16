@@ -1,0 +1,16 @@
+name: Cppcheck Static Analysis
+
+on:
+  pull_request:
+
+jobs:
+  cpp-analysis:
+    uses: metisx-dev/.github/.github/workflows/cpp-check-static-analysis.yml@main
+    with:
+      working_directory: '.'
+      suppressions_file: ''
+      exclude_folders: ''
+      fail_on_warnings: true
+      inconclusive: true
+    secrets:
+      PAT_TOKEN: ${{ secrets.METISX_GIT_ACTION_ACCESS_TOKEN }}
