@@ -1,0 +1,27 @@
+- name: MX Driver DMA Test
+  commons:
+    description: "MX Driver DMA Test Suite"
+    version: "1.0"
+    ssh_port: "10000"
+    documentation: ""
+    test_path: "sdk/tests/dma_test"
+    env_vars:
+      - XCENA_SDK_RELEASE_PATH: "."
+  targets:
+    qemu:
+      build_command:
+        - cd emulator && ./setup.sh --clean --dev
+      setup:
+        - cd emulator && ./run.sh --bg
+      teardown:
+        - cd emulator && ./kill_bg.sh
+    qemu_5_15:
+      build_command:
+        - cd emulator && ./setup.sh --clean --dev --config cfg/setup-5.15.conf
+      setup:
+        - cd emulator && ./run.sh --bg
+      teardown:
+        - cd emulator && ./kill_bg.sh
+  test_cases:
+    - name: mxdriver_dma_cxl_6_10
+    - name: mxdriver_dma_cxl_5_15

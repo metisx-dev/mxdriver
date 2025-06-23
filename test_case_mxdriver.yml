@@ -1,0 +1,18 @@
+- name: mxdriver_dma_cxl_6_10
+  command: ./test.sh
+  description: "MX Driver DMA Test Case for CXL 6.10"
+  version: "1.0"
+  target:
+    - qemu
+  tags:
+    - regression
+    - daily
+- name: mxdriver_dma_cxl_5_15
+  command: ./test.sh
+  description: "MX Driver DMA Test Case for CXL 5.15"
+  version: "1.0"
+  target:
+    - qemu_5_15
+  tags:
+    - regression
+    - daily
