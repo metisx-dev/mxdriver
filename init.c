@@ -299,6 +299,8 @@ static void destroy_mx_pdev(struct pci_dev *pdev)
 	if (!mx_pdev)
 		return;
 
+	dma_pool_destroy(mx_pdev->page_pool);
+
 	mx_engine_exit(&mx_pdev->engine);
 
 	for (type = 0; type < NUM_OF_MXDMA_TYPE; type++)
@@ -368,6 +370,8 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 		pr_err("Failed to mx_engine_init (err=%d)\n", ret);
 		goto out_fail;
 	}
+
+	mx_pdev->page_pool = dma_pool_create("mxdma_page_pool", &pdev->dev, SINGLE_DMA_SIZE, SINGLE_DMA_SIZE, 0);
 
 	mxdma_device_online(pdev);
 

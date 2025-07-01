@@ -12,11 +12,12 @@ module_param(parallel_count, int, 0644);
 /******************************************************************************/
 static void desc_list_free(struct device *dev, struct mx_transfer *transfer)
 {
+	struct mx_pci_dev *mx_pdev = dev_get_drvdata(dev);
 	int i;
 
 	for (i = 0; i < transfer->desc_list_cnt; i++) {
 		if (transfer->desc_list_va[i])
-			dma_free_coherent(dev, SINGLE_DMA_SIZE, transfer->desc_list_va[i], transfer->desc_list_ba[i]);
+			dma_pool_free(mx_pdev->page_pool, transfer->desc_list_va[i], transfer->desc_list_ba[i]);
 	}
 
 	if (transfer->desc_list_va)
@@ -27,6 +28,7 @@ static void desc_list_free(struct device *dev, struct mx_transfer *transfer)
 
 static int desc_list_alloc(struct device *dev, struct mx_transfer *transfer, int list_cnt)
 {
+	struct mx_pci_dev *mx_pdev = dev_get_drvdata(dev);
 	int i;
 
 	transfer->desc_list_cnt = list_cnt;
@@ -37,7 +39,7 @@ static int desc_list_alloc(struct device *dev, struct mx_transfer *transfer, int
 		void *cpu_addr;
 		dma_addr_t bus_addr;
 
-		cpu_addr = dma_alloc_coherent(dev, SINGLE_DMA_SIZE, &bus_addr, GFP_KERNEL);
+		cpu_addr = dma_pool_alloc(mx_pdev->page_pool, GFP_ATOMIC, &bus_addr);
 		if (!cpu_addr)
 			goto fail;
 
