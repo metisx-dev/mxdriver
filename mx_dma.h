@@ -204,6 +204,8 @@ struct mx_pci_dev {
 
 	int num_of_cdev;
 	struct mx_char_dev mx_cdev[NUM_OF_MXDMA_TYPE];
+
+	struct dma_pool *page_pool;
 };
 
 extern struct file_operations *mxdma_fops_array[];
