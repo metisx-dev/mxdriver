@@ -105,10 +105,7 @@ static ssize_t mxdma_device_read_context(struct file *file, char __user *buf, si
 	if (ret)
 		return ret;
 
-	if (count >= sizeof(uint64_t))
-		return read_data_from_device(mx_pdev, buf, count, pos, MXDMA_OP_CONTEXT_READ, mx_cdev->nowait);
-	else
-		return read_ctrl_from_device(mx_pdev, buf, count, pos, MXDMA_OP_CONTEXT_READ, mx_cdev->nowait);
+	return read_data_from_device(mx_pdev, buf, count, pos, MXDMA_OP_CONTEXT_READ, mx_cdev->nowait);
 }
 
 static ssize_t mxdma_device_read_sq(struct file *file, char __user *buf, size_t count, loff_t *pos)
@@ -117,8 +114,8 @@ static ssize_t mxdma_device_read_sq(struct file *file, char __user *buf, size_t 
 	struct mx_pci_dev *mx_pdev;
 	int ret;
 
-	if (!count) {
-		pr_warn("size of data to read is zero\n");
+	if (count != sizeof(uint64_t)) {
+		pr_warn("size of data to read is not supported: %zu\n", count);
 		return -EINVAL;
 	}
 
@@ -126,10 +123,7 @@ static ssize_t mxdma_device_read_sq(struct file *file, char __user *buf, size_t 
 	if (ret)
 		return ret;
 
-	if (count <= sizeof(uint64_t))
-		return read_ctrl_from_device(mx_pdev, buf, count, pos, MXDMA_OP_SQ_READ, mx_cdev->nowait);
-	else
-		return -EINVAL;
+	return read_ctrl_from_device(mx_pdev, buf, count, pos, MXDMA_OP_SQ_READ, mx_cdev->nowait);
 }
 
 static ssize_t mxdma_device_read_cq(struct file *file, char __user *buf, size_t count, loff_t *pos)
@@ -138,8 +132,8 @@ static ssize_t mxdma_device_read_cq(struct file *file, char __user *buf, size_t 
 	struct mx_pci_dev *mx_pdev;
 	int ret;
 
-	if (!count) {
-		pr_warn("size of data to read is zero\n");
+	if (count != sizeof(uint64_t)) {
+		pr_warn("size of data to read is not supported: %zu\n", count);
 		return -EINVAL;
 	}
 
@@ -147,10 +141,7 @@ static ssize_t mxdma_device_read_cq(struct file *file, char __user *buf, size_t 
 	if (ret)
 		return ret;
 
-	if (count <= sizeof(uint64_t))
-		return read_ctrl_from_device(mx_pdev, buf, count, pos, MXDMA_OP_CQ_READ, mx_cdev->nowait);
-	else
-		return -EINVAL;
+	return read_ctrl_from_device(mx_pdev, buf, count, pos, MXDMA_OP_CQ_READ, mx_cdev->nowait);
 }
 
 static ssize_t mxdma_device_write_data(struct file *file, const char __user *buf, size_t count, loff_t *pos)
@@ -186,10 +177,7 @@ static ssize_t mxdma_device_write_context(struct file *file, const char __user *
 	if (ret)
 		return ret;
 
-	if (count >= sizeof(uint64_t))
-		return write_data_to_device(mx_pdev, buf, count, pos, MXDMA_OP_CONTEXT_WRITE, mx_cdev->nowait);
-	else
-		return write_ctrl_to_device(mx_pdev, buf, count, pos, MXDMA_OP_CONTEXT_WRITE, mx_cdev->nowait);
+	return write_data_to_device(mx_pdev, buf, count, pos, MXDMA_OP_CONTEXT_WRITE, mx_cdev->nowait);
 }
 
 static ssize_t mxdma_device_write_sq(struct file *file, const char __user *buf, size_t count, loff_t *pos)
@@ -198,8 +186,8 @@ static ssize_t mxdma_device_write_sq(struct file *file, const char __user *buf, 
 	struct mx_pci_dev *mx_pdev;
 	int ret;
 
-	if (!count) {
-		pr_warn("size of data to write is zero\n");
+	if (count != sizeof(uint32_t)) {
+		pr_warn("size of data to write is not supported: %zu\n", count);
 		return -EINVAL;
 	}
 
@@ -207,10 +195,7 @@ static ssize_t mxdma_device_write_sq(struct file *file, const char __user *buf, 
 	if (ret)
 		return ret;
 
-	if (count <= sizeof(uint64_t))
-		return write_ctrl_to_device(mx_pdev, buf, count, pos, MXDMA_OP_SQ_WRITE, mx_cdev->nowait);
-	else
-		return -EINVAL;
+	return write_ctrl_to_device(mx_pdev, buf, count, pos, MXDMA_OP_SQ_WRITE, mx_cdev->nowait);
 }
 
 static ssize_t mxdma_device_write_cq(struct file *file, const char __user *buf, size_t count, loff_t *pos)
@@ -219,8 +204,8 @@ static ssize_t mxdma_device_write_cq(struct file *file, const char __user *buf, 
 	struct mx_pci_dev *mx_pdev;
 	int ret;
 
-	if (!count) {
-		pr_warn("size of data to write is zero\n");
+	if (count != sizeof(uint32_t)) {
+		pr_warn("size of data to write is not supported: %zu\n", count);
 		return -EINVAL;
 	}
 
@@ -228,10 +213,7 @@ static ssize_t mxdma_device_write_cq(struct file *file, const char __user *buf, 
 	if (ret)
 		return ret;
 
-	if (count <= sizeof(uint64_t))
-		return write_ctrl_to_device(mx_pdev, buf, count, pos, MXDMA_OP_CQ_WRITE, mx_cdev->nowait);
-	else
-		return -EINVAL;
+	return write_ctrl_to_device(mx_pdev, buf, count, pos, MXDMA_OP_CQ_WRITE, mx_cdev->nowait);
 }
 
 static unsigned int mxdma_device_poll(struct file *file, poll_table *wait)
