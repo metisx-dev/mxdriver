@@ -22,7 +22,19 @@ const struct kernel_param_ops wait_count_ops = {
 	.get = &get_wait_count,
 };
 
-module_param_cb(wait_count, &wait_count_ops, &wait_count, 0664);
+unsigned int debug_print = 0;
+module_param(debug_print, int, 0644);
+
+static const char * const mxdma_op_name[] = {
+	"R_DATA(0)",
+	"W_DATA(1)",
+	"R_CTX(2)",
+	"W_CTX(3)",
+	"R_SQ(4)",
+	"W_SQ(5)",
+	"R_CQ(6)",
+	"W_CQ(7)",
+};
 
 /******************************************************************************/
 /* Helpers                                                                    */
@@ -108,8 +120,10 @@ static void push_mx_command(struct mx_mbox *mbox, struct mx_command *comm)
 	ctx.tail = get_next_index(ctx.tail, sizeof(struct mx_command) / sizeof(uint64_t), mbox->depth);
 	writel(ctx.u32[1], db_addr);
 
-	pr_debug_dma("[SQ] id=%u opcode=%u ep_addr=%#llx host_addr=%#llx size=%#llx",
-			comm->id, comm->opcode, comm->device_addr, comm->host_addr, comm->length);
+	if (debug_print) {
+		pr_info("id=%u op=%s ep=%#llx host=%#llx size=%#llx %s\n",
+				comm->id, mxdma_op_name[comm->opcode], comm->device_addr, comm->host_addr, comm->length, comm->nowait ? "[nowait]" : "");
+	}
 }
 
 static void pop_mx_command(struct mx_mbox *mbox, struct mx_command *comm)
@@ -130,8 +144,10 @@ static void pop_mx_command(struct mx_mbox *mbox, struct mx_command *comm)
 	ctx.head = get_next_index(ctx.head, sizeof(struct mx_command) / sizeof(uint64_t), mbox->depth);
 	writel(ctx.u32[1], db_addr);
 
-	pr_debug_dma("[CQ] id=%u opcode=%u ep_addr=%#llx host_addr=%#llx size=%#llx",
-			comm->id, comm->opcode, comm->device_addr, comm->host_addr, comm->length);
+	if (debug_print) {
+		pr_info("id=%u op=%s ep=%#llx host=%#llx size=%#llx\n",
+				comm->id, mxdma_op_name[comm->opcode], comm->device_addr, comm->host_addr, comm->length);
+	}
 }
 
 /******************************************************************************/
