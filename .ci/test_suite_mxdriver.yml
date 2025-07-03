@@ -1,0 +1,14 @@
+name: MX Driver DMA Test Suite
+description: "MX Driver DMA Test Suite"
+test_scope_includes:
+  - .ci
+working_repository: sdk_release
+targets:
+  qemu:
+    - commons:
+       - ssh_port: 10000
+    - build:
+       - cd emulator
+       - ./setup.sh
+    - teardown:
+       - cd emulator && ./kill_bg.sh
