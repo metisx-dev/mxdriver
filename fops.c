@@ -87,7 +87,10 @@ static ssize_t mxdma_device_read_data(struct file *file, char __user *buf, size_
 	if (ret)
 		return ret;
 
-	return read_data_from_device_parallel(mx_pdev, buf, count, pos, MXDMA_OP_DATA_READ, mx_cdev->nowait);
+	if (mx_cdev->nowait)
+		return -EINVAL;
+
+	return read_data_from_device_parallel(mx_pdev, buf, count, pos, MXDMA_OP_DATA_READ);
 }
 
 static ssize_t mxdma_device_read_context(struct file *file, char __user *buf, size_t count, loff_t *pos)
@@ -105,7 +108,10 @@ static ssize_t mxdma_device_read_context(struct file *file, char __user *buf, si
 	if (ret)
 		return ret;
 
-	return read_data_from_device(mx_pdev, buf, count, pos, MXDMA_OP_CONTEXT_READ, mx_cdev->nowait);
+	if (mx_cdev->nowait)
+		return -EINVAL;
+
+	return read_data_from_device(mx_pdev, buf, count, pos, MXDMA_OP_CONTEXT_READ);
 }
 
 static ssize_t mxdma_device_read_sq(struct file *file, char __user *buf, size_t count, loff_t *pos)
@@ -123,7 +129,10 @@ static ssize_t mxdma_device_read_sq(struct file *file, char __user *buf, size_t 
 	if (ret)
 		return ret;
 
-	return read_ctrl_from_device(mx_pdev, buf, count, pos, MXDMA_OP_SQ_READ, mx_cdev->nowait);
+	if (mx_cdev->nowait)
+		return -EINVAL;
+
+	return read_ctrl_from_device(mx_pdev, buf, count, pos, MXDMA_OP_SQ_READ);
 }
 
 static ssize_t mxdma_device_read_cq(struct file *file, char __user *buf, size_t count, loff_t *pos)
@@ -141,7 +150,10 @@ static ssize_t mxdma_device_read_cq(struct file *file, char __user *buf, size_t 
 	if (ret)
 		return ret;
 
-	return read_ctrl_from_device(mx_pdev, buf, count, pos, MXDMA_OP_CQ_READ, mx_cdev->nowait);
+	if (mx_cdev->nowait)
+		return -EINVAL;
+
+	return read_ctrl_from_device(mx_pdev, buf, count, pos, MXDMA_OP_CQ_READ);
 }
 
 static ssize_t mxdma_device_write_data(struct file *file, const char __user *buf, size_t count, loff_t *pos)

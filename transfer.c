@@ -489,12 +489,12 @@ static struct mx_transfer *alloc_mx_transfer(char __user *user_addr, size_t size
 }
 
 ssize_t read_data_from_device(struct mx_pci_dev *mx_pdev,
-		char __user *user_addr, size_t size, loff_t *fpos, int opcode, bool nowait)
+		char __user *user_addr, size_t size, loff_t *fpos, int opcode)
 {
 	struct mx_transfer *transfer;
 	ssize_t ret;
 
-	transfer = alloc_mx_transfer(user_addr, size, *fpos, DMA_FROM_DEVICE, nowait);
+	transfer = alloc_mx_transfer(user_addr, size, *fpos, DMA_FROM_DEVICE, false);
 	if (!transfer) {
 		pr_warn("Failed to alloc mx_transfer\n");
 		return -ENOMEM;
@@ -527,12 +527,12 @@ ssize_t write_data_to_device(struct mx_pci_dev *mx_pdev,
 }
 
 ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev,
-		char __user *user_addr, size_t size, loff_t *fpos, int opcode, bool nowait)
+		char __user *user_addr, size_t size, loff_t *fpos, int opcode)
 {
 	struct mx_transfer *transfer;
 	ssize_t ret;
 
-	transfer = alloc_mx_transfer(user_addr, size, *fpos, DMA_FROM_DEVICE, nowait);
+	transfer = alloc_mx_transfer(user_addr, size, *fpos, DMA_FROM_DEVICE, false);
 	if (!transfer) {
 		pr_warn("Failed to alloc mx_transfer\n");
 		return -ENOMEM;
@@ -614,7 +614,7 @@ static void free_mx_transfer_parallel(struct mx_transfer **transfer, int count)
 }
 
 ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev,
-		char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait)
+		char __user *buf, size_t size, loff_t *fpos, int opcode)
 {
 	struct mx_transfer **transfer;
 	uint64_t first_page_index, last_page_index;
@@ -627,9 +627,9 @@ ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev,
 	count = min_t(int, nr_pages, parallel_count);
 
 	if (count == 1)
-		return read_data_from_device(mx_pdev, buf, size, fpos, opcode, nowait);
+		return read_data_from_device(mx_pdev, buf, size, fpos, opcode);
 
-	transfer = alloc_mx_transfer_parallel(buf, size, *fpos, DMA_FROM_DEVICE, nr_pages, count, nowait);
+	transfer = alloc_mx_transfer_parallel(buf, size, *fpos, DMA_FROM_DEVICE, nr_pages, count, false);
 	if (!transfer)
 		return -ENOMEM;
 
