@@ -3,14 +3,9 @@ description: "MX Driver DMA Test Suite"
 test_scope_includes:
   - .ci
 working_repository: sdk_release
-env_vars:
-  - LD_LIBRARY_PATH: "./lib"
 targets:
   qemu:
     - commons:
        - ssh_port: 10000
-    - build:
-       - cd emulator
-       - ./setup.sh
     - teardown:
-       - cd emulator && ./kill_bg.sh
+       - pwd && ./kill_bg.sh
