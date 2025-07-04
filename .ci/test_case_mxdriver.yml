@@ -1,7 +1,7 @@
 - name: mxdriver_dma_cxl_6_10
   command: 
     - cd emulator && ./setup.sh --kernel --rootfs
-    - ./run.sh --bg
+    - sudo ./run.sh --bg
     - ./test.sh
   description: "MX Driver DMA Test Case for CXL 6.10"
   version: "1.0"
@@ -13,7 +13,7 @@
 - name: mxdriver_dma_cxl_5_15
   command:
     - cd emulator && ./setup.sh  --kernel --rootfs --config cfg/setup-5.15.conf
-    - ./run.sh --bg
+    - sudo ./run.sh --bg
     - ./test.sh
   description: "MX Driver DMA Test Case for CXL 5.15"
   version: "1.0"
