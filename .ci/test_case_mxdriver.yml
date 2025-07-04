@@ -5,7 +5,7 @@
     - ./test.sh    
   description: "MX Driver DMA Test Case for CXL 6.10"
   version: "1.0"
-  target:
+  targets:
     - qemu
   tags:
     - push
@@ -16,7 +16,7 @@
     - ./test.sh
   description: "MX Driver DMA Test Case for CXL 5.15"
   version: "1.0"
-  target:
+  targets:
     - qemu
   tags:
     - push
