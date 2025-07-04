@@ -9,6 +9,7 @@
     - qemu
   tags:
     - push
+    - pr
 - name: mxdriver_dma_cxl_5_15
   command:
     - cd emulator && ./setup.sh --clean --dev --config cfg/setup-5.15.conf
@@ -20,3 +21,4 @@
     - qemu
   tags:
     - push
+    - pr
