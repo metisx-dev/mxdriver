@@ -8,4 +8,5 @@ targets:
     - commons:
        - ssh_port: 10000
     - teardown:
-       - pwd && ./kill_bg.sh
+       - pwd && sudo ./kill_bg.sh
+       - sudo pkill -f 'qemu_sim_0 xcena.dev0'
