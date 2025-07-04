@@ -11,4 +11,4 @@ targets:
        - cd emulator
        - ./setup.sh
     - teardown:
-       - cd emulator && ./kill_bg.sh
+       - ./kill_bg.sh
