@@ -2,7 +2,7 @@
   command: 
     - cd emulator && ./setup.sh --kernel --rootfs
     - ./run.sh --bg
-    - ./test.sh    
+    - ./test.sh
   description: "MX Driver DMA Test Case for CXL 6.10"
   version: "1.0"
   targets:

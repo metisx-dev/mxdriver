@@ -3,6 +3,8 @@ description: "MX Driver DMA Test Suite"
 test_scope_includes:
   - .ci
 working_repository: sdk_release
+env_var:
+  - LD_LIBRARY_PATH: "./lib"
 targets:
   qemu:
     - commons:
