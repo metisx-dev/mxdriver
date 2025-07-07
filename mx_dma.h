@@ -20,61 +20,48 @@
 
 #define MXDMA_NODE_NAME		"mx_dma"
 
-#define MAGIC_COMMAND		0x1234
-#define MAGIC_ENGINE	        0xEEEEEEEEUL
 #define MAGIC_CHAR		0xCCCCCCCCUL
 #define MAGIC_DEVICE		0xDDDDDDDDUL
 
-#define MXDMA_BAR_COUNT		8
-#define HMBOX_BAR_INDEX		2
+#define MXDMA_BAR_INDEX	2
 
-#define HMBOX_RQ_OFFSET		0x1000
-#define HIO_HOST_Q_OFFSET	48
-#define HMBOX_UPDATE_BITMASK	(1ull << 18)
-#define HMBOX_DB_OFFSET		4
-
-#define INVALID_CTX		0xFFFFFFFFFFFFFFFF
-
-#define POWER_OF_2(x)		(BIT(x))
-
-#define SINGLE_DMA_SIZE		(1 << 10) /* 1KB */
+#define SINGLE_DMA_SIZE		PAGE_SIZE
 #define NUM_OF_DESC_PER_LIST	(SINGLE_DMA_SIZE / sizeof(uint64_t))
 
-#define SQ_POLLING_MSEC		4
-#define CQ_POLLING_MSEC		4
-
 enum {
-	MXDMA_TYPE_DATA = 0,
-	MXDMA_TYPE_CONTEXT,
-	MXDMA_TYPE_SQ,
-	MXDMA_TYPE_CQ,
-	MXDMA_TYPE_DATA_NOWAIT,
-	MXDMA_TYPE_CONTEXT_NOWAIT,
-	MXDMA_TYPE_SQ_NOWAIT,
-	MXDMA_TYPE_CQ_NOWAIT,
-	MXDMA_TYPE_EVENT,
-	NUM_OF_MXDMA_TYPE,
+	MX_CDEV_DATA = 0,
+	MX_CDEV_CONTEXT,
+	MX_CDEV_SQ,
+	MX_CDEV_CQ,
+	MX_CDEV_DATA_NOWAIT,
+	MX_CDEV_CONTEXT_NOWAIT,
+	MX_CDEV_SQ_NOWAIT,
+	MX_CDEV_CQ_NOWAIT,
+	MX_CDEV_EVENT,
+	NUM_OF_MX_CDEV,
 };
 
 enum {
-	MXDMA_OP_DATA_READ = 0,
-	MXDMA_OP_DATA_WRITE,
-	MXDMA_OP_CONTEXT_READ,
-	MXDMA_OP_CONTEXT_WRITE,
-	MXDMA_OP_SQ_READ,
-	MXDMA_OP_SQ_WRITE,
-	MXDMA_OP_CQ_READ,
-	MXDMA_OP_CQ_WRITE,
+	IO_OPCODE_DATA_READ = 0,
+	IO_OPCODE_DATA_WRITE,
+	IO_OPCODE_CONTEXT_READ,
+	IO_OPCODE_CONTEXT_WRITE,
+	IO_OPCODE_SQ_READ,
+	IO_OPCODE_SQ_WRITE,
+	IO_OPCODE_CQ_READ,
+	IO_OPCODE_CQ_WRITE,
 };
 
 enum {
-	MXDMA_TRANSFER_START = 0,
-	MXDMA_TRANSFER_COMPLETE,
+	ADMIN_OPCODE_CREATE_IO_SQ = 0,
+	ADMIN_OPCODE_DELETE_IO_SQ,
+	ADMIN_OPCODE_CREATE_IO_CQ,
+	ADMIN_OPCODE_DELETE_IO_CQ,
 };
 
 enum {
-	MXDMA_PAGE_MODE_SINGLE = 0,
-	MXDMA_PAGE_MODE_MULTI,
+	IO_FLAGS_NOWAIT = 0,
+	IO_FLAGS_PRP,
 };
 
 static const char * const node_name[] = {
@@ -89,51 +76,44 @@ static const char * const node_name[] = {
 	MXDMA_NODE_NAME "%d_event",
 };
 
-typedef union {
-	struct {
-		uint8_t index :7;
-		uint8_t phase :1;
-	};
-	uint8_t full;
-} mbox_index_t;
-
-typedef union {
-	struct {
-		uint64_t mid : 8;
-		uint64_t ctx_base : 16;
-		uint64_t data_base : 16;
-		uint64_t q_size : 4;
-		uint64_t data_size : 4;
-		uint64_t tail : 8;
-		uint64_t head : 8;
-	};
-	uint64_t u64;
-	uint32_t u32[2];
-} mbox_context_t;
+typedef struct
+{
+	uint16_t depth;
+	uint16_t cq_id;
+	uint16_t sq_id;
+	uint16_t rsvd1;
+} io_queue_info_t;
 
 struct mx_command {
-	union {
-		struct {
-			uint64_t magic : 16;
-			uint64_t opcode : 4;
-			uint64_t control : 4;
-			uint64_t page_mode : 2;
-			uint64_t id : 16;
-			uint64_t barrier_index : 6;
-			uint64_t rsvd : 14;
-			uint64_t nowait : 2;
-		};
-		uint64_t header;
+	uint8_t opcode;
+	uint8_t flags;
+	uint16_t command_id;
+	uint32_t rsvd1;
+	uint64_t rsvd2;
+	uint64_t rsvd3;
+	union
+	{
+		uint64_t host_addr;
+		uint64_t prp_entry1;
+		uint64_t doorbell_value;
 	};
-	uint64_t length;
-	uint64_t device_addr;
-	/*
-	 * if page_mode == MXDMA_PAGE_MOODE_SINGLE, host_addr
-	 * if page_mode == MXDMA_PAGE_MODE_MULTI, next_desc_list_addr
-	 * if db read/write, doorbell_value
-	 */
-	uint64_t host_addr;
-} __packed;
+	uint64_t prp_entry2;
+	union {
+		uint64_t device_addr;
+		io_queue_info_t io_queue_info;
+	};
+	uint64_t size;
+	uint64_t rsvd4;
+};
+
+struct mx_completion
+{
+	uint64_t result;
+	uint16_t sq_head;
+	uint16_t sq_id;
+	uint16_t command_id;
+	uint16_t status;
+};
 
 struct mx_transfer {
 	void __user *user_addr;
@@ -142,9 +122,10 @@ struct mx_transfer {
 	enum dma_data_direction dir;
 	bool nowait;
 
-	struct mx_command cmd;
+	struct mx_command command;
 	struct list_head entry;
 	struct completion done;
+	uint64_t result;
 
 	/* Used for data transfer */
 	struct sg_table sgt;
@@ -155,20 +136,28 @@ struct mx_transfer {
 	dma_addr_t *desc_list_ba;
 };
 
-struct mx_mbox {
-	void __iomem *ctx_addr;
-	void __iomem *data_addr;
-	uint64_t depth;
-
-	struct list_head wait_list;
-	struct task_struct *thread;
-	spinlock_t lock;
+struct mx_event {
+	atomic_t count;
+	wait_queue_head_t wq;
 };
 
-struct mx_engine {
-	unsigned long magic;
-	struct mx_mbox submit;
-	struct mx_mbox complete;
+struct mx_queue {
+	uint16_t qid;
+	struct mx_command *sqes;
+	struct mx_completion *cqes;
+	dma_addr_t sq_dma_addr;
+	dma_addr_t cq_dma_addr;
+
+	uint32_t depth;
+	uint16_t last_sq_tail;
+	uint16_t sq_tail;
+	uint16_t sq_head;
+	uint16_t cq_head;
+	uint16_t cq_phase;
+	void __iomem *db;
+
+	struct list_head sq_list;
+	spinlock_t sq_lock;
 };
 
 struct mx_char_dev {
@@ -181,29 +170,27 @@ struct mx_char_dev {
 	bool enabled;
 };
 
-struct mx_event {
-	atomic_t count;
-	wait_queue_head_t wq;
-};
-
 struct mx_pci_dev {
 	unsigned long magic;
 	int id;
 	dev_t dev_no;
 
 	struct pci_dev *pdev;
-	bool has_regions;
 	bool enabled;
 
-	void __iomem *hmbox_bar;
-	uint32_t hmbox_size;
+	void __iomem *bar;
+	uint32_t __iomem *dbs;
+	uint32_t bar_mapped_size;
 
 	struct mx_event event;
+	struct mx_queue admin_queue;
+	struct mx_queue io_queue;
 
-	struct mx_engine engine;
+	struct task_struct *comm_thread;
+	struct task_struct *cmpl_thread;
 
 	int num_of_cdev;
-	struct mx_char_dev mx_cdev[NUM_OF_MXDMA_TYPE];
+	struct mx_char_dev mx_cdev[NUM_OF_MX_CDEV];
 
 	struct dma_pool *page_pool;
 };
@@ -226,8 +213,15 @@ ssize_t write_data_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf,
 ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode);
 ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
 
-int mx_command_submit_handler(void *arg);
-int mx_command_complete_handler(void *arg);
+void *get_sqe_ptr(struct mx_queue *queue);
+void *get_cqe_ptr(struct mx_queue *queue);
+void update_sq_doorbell(struct mx_queue *queue);
+void update_cq_doorbell(struct mx_queue *queue);
+void ring_sq_doorbell(struct mx_queue *queue);
+void ring_cq_doorbell(struct mx_queue *queue);
+
+int mx_command_handler(void *arg);
+int mx_completion_handler(void *arg);
 
 #ifdef CONFIG_DEBUG_DMA
 #define pr_debug_dma(fmt, ...) pr_info(fmt, ##__VA_ARGS__)

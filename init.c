@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: <SPDX License Expression>
 
+#include <linux/nvme.h>
+
 #include "mx_dma.h"
 
 /******************************************************************************/
@@ -39,18 +41,183 @@ out:
 	return IRQ_HANDLED;
 }
 
-static void pci_device_exit(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
+static int alloc_mx_queue(struct device *dev, struct mx_queue *queue, uint32_t q_depth)
 {
+	queue->depth = q_depth;
+	queue->cqes = dma_alloc_coherent(dev, queue->depth * sizeof(struct mx_completion), &queue->cq_dma_addr, GFP_KERNEL);
+	if (!queue->cqes)
+		return -ENOMEM;
+
+	queue->sqes = dma_alloc_coherent(dev, queue->depth * sizeof(struct mx_command), &queue->sq_dma_addr, GFP_KERNEL);
+	if (!queue->sqes)
+		dma_free_coherent(dev, queue->depth * sizeof(struct mx_completion), (void *)queue->cqes, queue->cq_dma_addr);
+
+	return 0;
+}
+
+static int release_mx_queue(struct device *dev, struct mx_queue *queue)
+{
+	if (!queue->cqes || !queue->sqes)
+		return -EINVAL;
+
+	dma_free_coherent(dev, queue->depth * sizeof(struct mx_completion), (void *)queue->cqes, queue->cq_dma_addr);
+	dma_free_coherent(dev, queue->depth * sizeof(struct mx_command), (void *)queue->sqes, queue->sq_dma_addr);
+
+	queue->cqes = NULL;
+	queue->sqes = NULL;
+	queue->cq_dma_addr = 0;
+	queue->sq_dma_addr = 0;
+
+	return 0;
+}
+
+static void init_mx_queue(struct mx_pci_dev *mx_pdev, struct mx_queue *queue, uint16_t qid)
+{
+	queue->qid = qid;
+	queue->sq_tail = 0;
+	queue->sq_head = 0;
+	queue->cq_head = 0;
+	queue->cq_phase = 1;
+	queue->db = &mx_pdev->dbs[qid * 2 * sizeof(uint32_t)];
+	memset((void *)queue->cqes, 0, queue->depth * sizeof(struct mx_completion));
+	memset((void *)queue->sqes, 0, queue->depth * sizeof(struct mx_command));
+	wmb();
+}
+
+static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
+{
+	struct device *dev = &mx_pdev->pdev->dev;
+	struct mx_queue *admin_queue = &mx_pdev->admin_queue;
+	uint32_t aqa;
+	int ret;
+
+	ret = alloc_mx_queue(dev, admin_queue, NVME_AQ_DEPTH);
+	if (ret)
+		return ret;
+
+	aqa = admin_queue->depth - 1;
+	aqa |= aqa << 16;
+	writel(aqa, mx_pdev->bar + NVME_REG_AQA);
+	writeq(admin_queue->sq_dma_addr, mx_pdev->bar + NVME_REG_ASQ);
+	writeq(admin_queue->cq_dma_addr, mx_pdev->bar + NVME_REG_ACQ);
+
+	init_mx_queue(mx_pdev, admin_queue, 0);
+
+	return 0;
+}
+
+static int release_admin_queue(struct mx_pci_dev *mx_pdev)
+{
+	return release_mx_queue(&mx_pdev->pdev->dev, &mx_pdev->admin_queue);
+}
+
+static uint64_t submit_sync_command(struct mx_queue* queue, struct mx_command *c)
+{
+	struct mx_command *comm;
+	struct mx_completion *cmpl;
+
+	comm = (struct mx_command *)get_sqe_ptr(queue);
+	if (!comm)
+		return -EAGAIN;
+
+	memcpy(comm, c, sizeof(struct mx_command));
+	update_sq_doorbell(queue);
+	ring_sq_doorbell(queue);
+
+	do {
+		cmpl = (struct mx_completion *)get_cqe_ptr(queue);
+	} while (!cmpl);
+
+	queue->sq_head = READ_ONCE(cmpl->sq_head);
+	update_cq_doorbell(queue);
+	ring_cq_doorbell(queue);
+
+	return cmpl->result;
+}
+
+static int configure_io_queue(struct mx_pci_dev *mx_pdev)
+{
+	struct device *dev = &mx_pdev->pdev->dev;
+	struct mx_queue *admin_queue = &mx_pdev->admin_queue;
+	struct mx_queue *io_queue = &mx_pdev->io_queue;
+	struct mx_command comm = {};
+	uint16_t cq_id, sq_id;
+	int ret;
+
+	ret = alloc_mx_queue(dev, io_queue, 256);
+	if (ret)
+		return ret;
+
+	comm.opcode = ADMIN_OPCODE_CREATE_IO_CQ;
+	comm.io_queue_info.depth = io_queue->depth;
+	cq_id = submit_sync_command(admin_queue, &comm);
+
+	comm.opcode = ADMIN_OPCODE_CREATE_IO_SQ;
+	comm.io_queue_info.cq_id = cq_id;
+	sq_id = submit_sync_command(admin_queue, &comm);
+
+	if (cq_id != sq_id) {
+		pr_err("Failed to create IO queue (cq_id=%d, sq_id=%d)\n", cq_id, sq_id);
+		return -EINVAL;
+	}
+
+	init_mx_queue(mx_pdev, io_queue, cq_id);
+
+	spin_lock_init(&io_queue->sq_lock);
+	INIT_LIST_HEAD(&io_queue->sq_list);
+	mx_pdev->comm_thread = kthread_run(mx_command_handler, io_queue, "mx_command_thd%d", mx_pdev->id);
+	mx_pdev->cmpl_thread = kthread_run(mx_completion_handler, io_queue, "mx_complete_thd%d", mx_pdev->id);
+
+	return 0;
+}
+
+static int release_io_queue(struct mx_pci_dev *mx_pdev)
+{
+
+	struct device *dev = &mx_pdev->pdev->dev;
+	struct mx_queue *admin_queue = &mx_pdev->admin_queue;
+	struct mx_queue *io_queue = &mx_pdev->io_queue;
+	struct mx_command comm = {};
+	int ret;
+
+	comm.opcode = ADMIN_OPCODE_DELETE_IO_CQ;
+	comm.io_queue_info.cq_id = io_queue->qid;
+	submit_sync_command(admin_queue, &comm);
+
+	comm.opcode = ADMIN_OPCODE_DELETE_IO_SQ;
+	comm.io_queue_info.cq_id = io_queue->qid;
+	submit_sync_command(admin_queue, &comm);
+
+	ret = release_mx_queue(dev, io_queue);
+	if (ret)
+		pr_err("Failed to release IO queue (err=%d)\n", ret);
+
+	if (mx_pdev->comm_thread) {
+		ret = kthread_stop(mx_pdev->comm_thread);
+		if (ret)
+			pr_err("%s doesn't stop properly (err=%d)\n", mx_pdev->comm_thread->comm, ret);
+	}
+
+	if (mx_pdev->cmpl_thread) {
+		ret = kthread_stop(mx_pdev->cmpl_thread);
+		if (ret)
+			pr_err("%s doesn't stop properly (err=%d)\n", mx_pdev->cmpl_thread->comm, ret);
+	}
+
+	return 0;
+}
+
+static void pci_device_exit(struct mx_pci_dev *mx_pdev)
+{
+	struct pci_dev *pdev = mx_pdev->pdev;
 	int irq = pci_irq_vector(pdev, 0);
 
 	free_irq(irq, NULL);
-
-	if (mx_pdev->has_regions)
-		pci_release_region(pdev, HMBOX_BAR_INDEX);
 }
 
-static int pci_device_init(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
+static int pci_device_init(struct mx_pci_dev *mx_pdev)
 {
+	struct pci_dev *pdev = mx_pdev->pdev;
 	int ret;
 
 	if (pci_is_enabled(pdev) == false) {
@@ -69,10 +236,6 @@ static int pci_device_init(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
 
 	if (!pdev->is_busmaster)
 		pci_set_master(pdev);
-
-	ret = pci_request_region(pdev, HMBOX_BAR_INDEX, MXDMA_NODE_NAME);
-	if (!ret)
-		mx_pdev->has_regions = true;
 
 	ret = pci_enable_msi(pdev);
 	if (ret) {
@@ -93,41 +256,56 @@ static int pci_device_init(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
 	return 0;
 }
 
-static void unmap_bars(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
+static void dev_unmap(struct mx_pci_dev *mx_pdev)
 {
-	if (!mx_pdev->hmbox_bar)
-		return;
+	struct pci_dev *pdev = mx_pdev->pdev;
 
-	pci_iounmap(pdev, mx_pdev->hmbox_bar);
+	if (mx_pdev->bar)
+		pci_iounmap(pdev, mx_pdev->bar);
+
+	pci_release_region(pdev, MXDMA_BAR_INDEX);
 }
 
-static int map_bars(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
+static int remap_bar(struct mx_pci_dev *mx_pdev, uint32_t size)
 {
-	resource_size_t start = pci_resource_start(pdev, HMBOX_BAR_INDEX);
-	resource_size_t len = pci_resource_len(pdev, HMBOX_BAR_INDEX);
-	void __iomem *bar;
+	struct pci_dev *pdev = mx_pdev->pdev;
 
-	if (len == 0) {
-		pr_err("HMBOX BAR is not available\n");
-		return -ENODEV;
+	if (size <= mx_pdev->bar_mapped_size)
+		return 0;
+
+	if (size > pci_resource_len(pdev, MXDMA_BAR_INDEX))
+		return -ENOMEM;
+
+	if (mx_pdev->bar)
+		pci_iounmap(pdev, mx_pdev->bar);
+
+	mx_pdev->bar = pci_iomap(pdev, MXDMA_BAR_INDEX, size);
+	if (!mx_pdev->bar) {
+		mx_pdev->bar_mapped_size = 0;
+		return -ENOMEM;
 	}
 
-	if (len > INT_MAX) {
-		pr_info("Limit HMBOX BAR mapping from %llu to %d bytes\n", (uint64_t)len, INT_MAX);
-		len = (resource_size_t)INT_MAX;
+	mx_pdev->bar_mapped_size = size;
+	mx_pdev->dbs = mx_pdev->bar + NVME_REG_DBS;
+
+	return 0;
+}
+
+static int dev_map(struct mx_pci_dev *mx_pdev)
+{
+	struct pci_dev *pdev = mx_pdev->pdev;
+	int ret;
+
+	ret = pci_request_region(pdev, MXDMA_BAR_INDEX, MXDMA_NODE_NAME);
+	if (ret)
+		return ret;
+
+	ret = remap_bar(mx_pdev, NVME_REG_DBS + 4096);
+	if (ret)
+	{
+		pci_release_region(pdev, MXDMA_BAR_INDEX);
+		return ret;
 	}
-
-	bar = pci_iomap(pdev, HMBOX_BAR_INDEX, len);
-	if (!bar) {
-		pr_err("Failed to pci_iomap(%d)\n", HMBOX_BAR_INDEX);
-		return -ENODEV;
-	}
-
-	mx_pdev->hmbox_bar = bar;
-	mx_pdev->hmbox_size = (uint32_t)len;
-
-	pr_info("HMBOX BAR at %#llx is mapped at %#llx, length=%u\n",
-			(uint64_t)start, (uint64_t)mx_pdev->hmbox_bar, mx_pdev->hmbox_size);
 
 	return 0;
 }
@@ -150,71 +328,9 @@ static int set_dma_addressing(struct pci_dev *pdev)
 	return 0;
 }
 
-static void mx_engine_exit(struct mx_engine *engine)
-{
-	int ret;
-
-	if (engine->submit.thread) {
-		ret = kthread_stop(engine->submit.thread);
-		if (ret)
-			pr_err("submit_thread thread doesn't stop properly (err=%d)\n", ret);
-	}
-
-	if (engine->complete.thread) {
-		ret = kthread_stop(engine->complete.thread);
-		if (ret)
-			pr_err("complete_thread thread doesn't stop properly (err=%d)\n", ret);
-	}
-}
-
-static int mx_engine_init(struct mx_engine *engine, void __iomem *bar, int dev_id)
-{
-	void __iomem *host_mbox_base = bar;
-	void __iomem *hifc_mbox_base = bar + (1 << 20); /* 1MB */
-	mbox_context_t ctx;
-
-	engine->magic = MAGIC_ENGINE;
-
-	/* Set up mailbox for submit */
-	engine->submit.ctx_addr = host_mbox_base + HIO_HOST_Q_OFFSET * sizeof(uint64_t);
-	ctx.u64 = readq(engine->submit.ctx_addr);
-	if (ctx.u64 == INVALID_CTX) {
-		pr_err("Invalid SQ context: %llx\n", ctx.u64);
-		return -ENXIO;
-	}
-
-	engine->submit.data_addr = hifc_mbox_base + sizeof(uint64_t) * ctx.data_base;
-	engine->submit.depth = POWER_OF_2(ctx.q_size);
-	pr_info("submit: ctx_addr=%#llx, data_addr=%#llx, ctx=%#llx\n",
-			(uint64_t)engine->submit.ctx_addr, (uint64_t)engine->submit.data_addr, ctx.u64);
-
-	spin_lock_init(&engine->submit.lock);
-	INIT_LIST_HEAD(&engine->submit.wait_list);
-	engine->submit.thread = kthread_run(mx_command_submit_handler, engine, "mx_submit_thread%d", dev_id);
-
-	/* Set up mailbox for complete */
-	engine->complete.ctx_addr = host_mbox_base + HIO_HOST_Q_OFFSET * sizeof(uint64_t) + HMBOX_RQ_OFFSET;
-	ctx.u64 = readq(engine->complete.ctx_addr);
-	if (ctx.u64 == INVALID_CTX) {
-		pr_err("Invalid CQ context: %llx\n", ctx.u64);
-		return -ENXIO;
-	}
-
-	engine->complete.data_addr = host_mbox_base + sizeof(uint64_t) * ctx.data_base;
-	engine->complete.depth = POWER_OF_2(ctx.q_size);
-	pr_info("complete: ctx_addr=%#llx, data_addr=%#llx, ctx=%#llx\n",
-			(uint64_t)engine->complete.ctx_addr, (uint64_t)engine->complete.data_addr, ctx.u64);
-
-	spin_lock_init(&engine->complete.lock);
-	INIT_LIST_HEAD(&engine->complete.wait_list);
-	engine->complete.thread = kthread_run(mx_command_complete_handler, engine, "mx_complete_thread%d", dev_id);
-
-	return 0;
-}
-
 static bool is_nowait_type(int type)
 {
-	if (type >= MXDMA_TYPE_DATA_NOWAIT && type <= MXDMA_TYPE_CQ_NOWAIT)
+	if (type >= MX_CDEV_DATA_NOWAIT && type <= MX_CDEV_CQ_NOWAIT)
 		return true;
 	return false;
 }
@@ -226,7 +342,7 @@ static int create_mx_cdev(struct mx_pci_dev *mx_pdev, int type)
 	int ret;
 
 	mx_cdev->magic = MAGIC_CHAR;
-	mx_cdev->cdev_no = MKDEV(MAJOR(mx_pdev->dev_no), mx_pdev->num_of_cdev++);
+	mx_cdev->cdev_no = MKDEV(MAJOR(mx_pdev->dev_no), type);
 	mx_cdev->nowait = is_nowait_type(type);
 
 	cdev_init(&mx_cdev->cdev, mxdma_fops_array[type]);
@@ -301,14 +417,15 @@ static void destroy_mx_pdev(struct pci_dev *pdev)
 
 	dma_pool_destroy(mx_pdev->page_pool);
 
-	mx_engine_exit(&mx_pdev->engine);
+	release_admin_queue(mx_pdev);
+	release_io_queue(mx_pdev);
 
-	for (type = 0; type < NUM_OF_MXDMA_TYPE; type++)
+	for (type = 0; type < NUM_OF_MX_CDEV; type++)
 		destroy_mx_cdev(&mx_pdev->mx_cdev[type]);
 
-	pci_device_exit(mx_pdev, pdev);
-	unmap_bars(mx_pdev, pdev);
-	unregister_chrdev_region(mx_pdev->dev_no, NUM_OF_MXDMA_TYPE);
+	pci_device_exit(mx_pdev);
+	dev_unmap(mx_pdev);
+	unregister_chrdev_region(mx_pdev->dev_no, NUM_OF_MX_CDEV);
 	devm_kfree(&pdev->dev, mx_pdev);
 	dev_set_drvdata(&pdev->dev, NULL);
 }
@@ -331,19 +448,19 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 	mx_pdev->pdev = pdev;
 	mx_pdev->id = cxl_memdev_id;
 
-	ret = alloc_chrdev_region(&mx_pdev->dev_no, 0, NUM_OF_MXDMA_TYPE, MXDMA_NODE_NAME);
+	ret = alloc_chrdev_region(&mx_pdev->dev_no, 0, NUM_OF_MX_CDEV, MXDMA_NODE_NAME);
 	if (ret) {
 		pr_err("Failed to alloc_chrdev_region (err=%d)\n", ret);
 		goto out_fail;
 	}
 
-	ret = map_bars(mx_pdev, pdev);
+	ret = dev_map(mx_pdev);
 	if (ret) {
-		pr_err("Failed to map_bars (err=%d)\n", ret);
+		pr_err("Failed to dev_map (err=%d)\n", ret);
 		goto out_fail;
 	}
 
-	ret = pci_device_init(mx_pdev, pdev);
+	ret = pci_device_init(mx_pdev);
 	if (ret) {
 		pr_err("Failed to init_pdev (err=%d)\n", ret);
 		goto out_fail;
@@ -355,20 +472,26 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 		goto out_fail;
 	}
 
+	ret = configure_admin_queue(mx_pdev);
+	if (ret) {
+		pr_err("Failed to configure_admin_queue (err=%d)\n", ret);
+		return ret;
+	}
+
+	ret = configure_io_queue(mx_pdev);
+	if (ret) {
+		pr_err("Failed to configure_io_queue (err=%d)\n", ret);
+		return ret;
+	}
+
 	mx_event_init(mx_pdev);
 
-	for (type = 0; type < NUM_OF_MXDMA_TYPE; type++) {
+	for (type = 0; type < NUM_OF_MX_CDEV; type++) {
 		ret = create_mx_cdev(mx_pdev, type);
 		if (ret) {
 			pr_err("Failed to create mx_cdev (%s) (err=%d)\n", node_name[type], ret);
 			goto out_fail;
 		}
-	}
-
-	ret = mx_engine_init(&mx_pdev->engine, mx_pdev->hmbox_bar, mx_pdev->id);
-	if (ret) {
-		pr_err("Failed to mx_engine_init (err=%d)\n", ret);
-		goto out_fail;
 	}
 
 	mx_pdev->page_pool = dma_pool_create("mxdma_page_pool", &pdev->dev, SINGLE_DMA_SIZE, SINGLE_DMA_SIZE, 0);

@@ -7,6 +7,8 @@ module_param(timeout_ms, int, 0644);
 unsigned int parallel_count = 2;
 module_param(parallel_count, int, 0644);
 
+#define POLLING_INTERVAL_MSEC	4
+
 /******************************************************************************/
 /* Functions for DMA                                                          */
 /******************************************************************************/
@@ -84,7 +86,6 @@ static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
 
 	ret = desc_list_alloc(dev, transfer, list_cnt);
 	if (ret) {
-		pr_warn("Failed to desc_list_alloc (err=%d)\n", ret);
 		return 0;
 	}
 
@@ -232,7 +233,7 @@ static int map_user_addr_to_sg(struct device *dev, struct mx_transfer *transfer)
 /******************************************************************************/
 static int mx_command_init_common(struct mx_transfer *transfer, int opcode)
 {
-	struct mx_command *cmd = &transfer->cmd;
+	struct mx_command *comm = &transfer->command;
 	int id;
 
 	id = transfer_id_alloc(transfer);
@@ -241,20 +242,21 @@ static int mx_command_init_common(struct mx_transfer *transfer, int opcode)
 		return -ENOMEM;
 	}
 
-	cmd->magic = MAGIC_COMMAND;
-	cmd->id = id;
-	cmd->opcode = opcode;
-	cmd->control = MXDMA_TRANSFER_START;
-	cmd->nowait = transfer->nowait ? 1 : 0;
-	cmd->length = transfer->size;
-	cmd->device_addr = transfer->device_addr;
+	comm->opcode = opcode;
+	comm->command_id = id;
+	comm->flags = 0;
+	comm->size = transfer->size;
+	comm->device_addr = transfer->device_addr;
+
+	if (transfer->nowait)
+		comm->flags |= (1 << IO_FLAGS_NOWAIT);
 
 	return 0;
 }
 
 static int mx_command_init_sg(struct device *dev, struct mx_transfer *transfer)
 {
-	struct mx_command *cmd = &transfer->cmd;
+	struct mx_command *comm = &transfer->command;
 	struct sg_table *sgt = &transfer->sgt;
 	struct scatterlist *sg = sgt->sgl;
 	unsigned int size = (PAGE_SIZE - sg->offset) % SINGLE_DMA_SIZE;
@@ -262,16 +264,18 @@ static int mx_command_init_sg(struct device *dev, struct mx_transfer *transfer)
 	size = size ? size : SINGLE_DMA_SIZE;
 
 	if (transfer->size <= size) {
-		cmd->page_mode = MXDMA_PAGE_MODE_SINGLE;
-		cmd->host_addr = sg_dma_address(sg);
+		comm->host_addr = sg_dma_address(sg);
+		if (!comm->host_addr) {
+			pr_warn("Failed to get sg_dma_address\n");
+			return -ENOMEM;
+		}
 	} else {
-		cmd->page_mode = MXDMA_PAGE_MODE_MULTI;
-		cmd->host_addr = desc_list_init(dev, transfer);
-	}
-
-	if (!cmd->host_addr) {
-		pr_warn("Failed to get sg_dma_address\n");
-		return -ENOMEM;
+		comm->flags = (1 << IO_FLAGS_PRP);
+		comm->prp_entry1 = desc_list_init(dev, transfer);
+		if (!comm->prp_entry1) {
+			pr_warn("Failed to desc_list_init\n");
+			return -ENOMEM;
+		}
 	}
 
 	return 0;
@@ -306,9 +310,8 @@ static int mx_transfer_init_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *t
 static void mx_transfer_destroy_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
 	struct device *dev = &mx_pdev->pdev->dev;
-	struct mx_command *comm = &transfer->cmd;
 
-	transfer_id_free(comm->id);
+	transfer_id_free(transfer->command.command_id);
 	desc_list_free(dev, transfer);
 	unmap_user_addr_to_sg(dev, transfer);
 }
@@ -332,23 +335,22 @@ static int mx_transfer_init_ctrl(struct mx_transfer *transfer, int opcode)
 		pr_warn("Failed to copy_from_user (err=%d)\n", ret);
 		return ret;
 	}
-	transfer->cmd.host_addr = value;
+	transfer->command.doorbell_value = value;
 
 	return 0;
 }
 
 static int mx_transfer_destroy_ctrl(struct mx_transfer *transfer)
 {
-	struct mx_command *comm = &transfer->cmd;
 	uint64_t value;
 	int ret;
 
-	transfer_id_free(comm->id);
+	transfer_id_free(transfer->command.command_id);
 
 	if (transfer->dir != DMA_FROM_DEVICE)
 		return 0;
 
-	value = transfer->cmd.host_addr;
+	value = transfer->result;
 	ret = copy_to_user(transfer->user_addr, &value, transfer->size);
 	if (ret)
 		pr_warn("Failed to copy_to_user (err=%d)\n", ret);
@@ -356,35 +358,28 @@ static int mx_transfer_destroy_ctrl(struct mx_transfer *transfer)
 	return ret;
 }
 
-static void mx_transfer_queue(struct mx_engine *engine, struct mx_transfer *transfer)
+static void mx_transfer_queue(struct mx_queue *queue, struct mx_transfer *transfer)
 {
-	struct mx_mbox *submit = &engine->submit;
 	unsigned long flags;
 
 	init_completion(&transfer->done);
 
-	spin_lock_irqsave(&submit->lock, flags);
-	list_add_tail(&transfer->entry, &submit->wait_list);
-	spin_unlock_irqrestore(&submit->lock, flags);
+	spin_lock_irqsave(&queue->sq_lock, flags);
+	list_add_tail(&transfer->entry, &queue->sq_list);
+	spin_unlock_irqrestore(&queue->sq_lock, flags);
 }
 
-static int mx_transfer_wait(struct mx_engine *engine, struct mx_transfer *transfer)
+static ssize_t mx_transfer_wait(struct mx_transfer *transfer)
 {
-	struct mx_command *comm = &transfer->cmd;
 	unsigned long left_time;
-	int ret = transfer->size;
 
 	left_time = wait_for_completion_timeout(&transfer->done, msecs_to_jiffies(timeout_ms));
 	if (left_time == 0) {
-		pr_warn("wait_for_completion is timeout (id=%u opcode=%u device_addr=%#llx host_addr=%#llx size=%#llx)\n",
-				comm->id, comm->opcode, comm->device_addr, comm->host_addr, comm->length);
-		ret = -ETIMEDOUT;
-	} else if (transfer->cmd.control != MXDMA_TRANSFER_COMPLETE) {
-		pr_warn("mx_transfer doesn't work properly. control=%d", transfer->cmd.control);
-		ret = -EIO;
+		pr_warn("wait_for_completion is timeout\n");
+		return -ETIMEDOUT;
 	}
 
-	return ret;
+	return transfer->size;
 }
 
 static ssize_t mx_transfer_submit_sg(struct mx_pci_dev *mx_pdev,
@@ -398,8 +393,8 @@ static ssize_t mx_transfer_submit_sg(struct mx_pci_dev *mx_pdev,
 		goto out;
 	}
 
-	mx_transfer_queue(&mx_pdev->engine, transfer);
-	ret = mx_transfer_wait(&mx_pdev->engine, transfer);
+	mx_transfer_queue(&mx_pdev->io_queue, transfer);
+	ret = mx_transfer_wait(transfer);
 	if (ret < 0)
 		pr_warn("Failed to wait mx_transfer (err=%ld)\n", ret);
 
@@ -422,11 +417,11 @@ static ssize_t mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
 			goto out;
 		}
 
-		mx_transfer_queue(&mx_pdev->engine, transfer[i]);
+		mx_transfer_queue(&mx_pdev->io_queue, transfer[i]);
 	}
 
 	for (i = 0; i < count; i++) {
-		int ret = mx_transfer_wait(&mx_pdev->engine, transfer[i]);
+		int ret = mx_transfer_wait(transfer[i]);
 		if (ret < 0)
 			pr_warn("Failed to wait mx_transfer (err=%d)\n", ret);
 		res += ret;
@@ -450,8 +445,8 @@ static ssize_t mx_transfer_submit_ctrl(struct mx_pci_dev *mx_pdev,
 		return ret;
 	}
 
-	mx_transfer_queue(&mx_pdev->engine, transfer);
-	ret = mx_transfer_wait(&mx_pdev->engine, transfer);
+	mx_transfer_queue(&mx_pdev->io_queue, transfer);
+	ret = mx_transfer_wait(transfer);
 	if (ret < 0) {
 		pr_warn("Failed to wait mx_transfer (err=%ld)\n", ret);
 		return ret;
@@ -664,3 +659,70 @@ ssize_t write_data_to_device_parallel(struct mx_pci_dev *mx_pdev,
 
 	return res;
 }
+
+/******************************************************************************/
+/* Functions for handler                                                      */
+/******************************************************************************/
+int mx_command_handler(void *arg)
+{
+	struct mx_queue *queue = (struct mx_queue *)arg;
+	struct mx_transfer *transfer, *tmp;
+	struct mx_command *comm;
+	unsigned long flags;
+
+	while (!kthread_should_stop()) {
+		if (list_empty(&queue->sq_list)) {
+			msleep(POLLING_INTERVAL_MSEC);
+			continue;
+		}
+
+		spin_lock_irqsave(&queue->sq_lock, flags);
+		list_for_each_entry_safe(transfer, tmp, &queue->sq_list, entry) {
+			comm = (struct mx_command *)get_sqe_ptr(queue);
+			if (!comm)
+				break;
+
+			memcpy(comm, &transfer->command, sizeof(struct mx_command));
+			update_sq_doorbell(queue);
+
+			if (transfer->nowait)
+				complete(&transfer->done);
+
+			list_del_init(&queue->sq_list);
+		}
+		spin_unlock_irqrestore(&queue->sq_lock, flags);
+
+		ring_sq_doorbell(queue);
+	}
+
+	return 0;
+}
+
+int mx_completion_handler(void *arg)
+{
+	struct mx_queue *queue = (struct mx_queue *)arg;
+	struct mx_transfer *transfer;
+	struct mx_completion *cmpl;
+
+	while (!kthread_should_stop()) {
+		cmpl = (struct mx_completion *)get_cqe_ptr(queue);
+		if (!cmpl) {
+			msleep(POLLING_INTERVAL_MSEC);
+			continue;
+		}
+
+		transfer = find_transfer_by_id(READ_ONCE(cmpl->command_id));
+		if (transfer) {
+			transfer->result = READ_ONCE(cmpl->result);
+			complete(&transfer->done);
+		}
+
+		queue->sq_head = READ_ONCE(cmpl->sq_head);
+
+		update_cq_doorbell(queue);
+		ring_cq_doorbell(queue);
+	}
+
+	return 0;
+}
+
