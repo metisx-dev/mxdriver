@@ -408,6 +408,48 @@ void mxdma_driver_remove(struct pci_dev *pdev)
 }
 EXPORT_SYMBOL(mxdma_driver_remove);
 
+/******************************************************************************/
+/* PCI Device Driver Support                                                  */
+/******************************************************************************/
+#ifdef CONFIG_WO_CXL
+static const struct pci_device_id pci_ids[] = {
+	{ PCI_DEVICE(0x20a6, PCI_ANY_ID), },
+	{ 0,}
+};
+MODULE_DEVICE_TABLE(pci, pci_ids);
+
+static int __mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+{
+	static int cxl_memdev_id = 0;
+	int ret;
+
+	ret = create_mx_pdev(pdev, cxl_memdev_id++);
+	if (ret) {
+		pr_err("Failed to create_mx_pdev\n");
+		return ret;
+	}
+
+	pr_info("pci device is probed (vendor=%#x device=%#x bdf=%s cxl=mem%d)\n",
+			pdev->vendor, pdev->device, dev_name(&pdev->dev), cxl_memdev_id);
+
+	return 0;
+}
+
+static void __mxdma_driver_remove(struct pci_dev *pdev)
+{
+	destroy_mx_pdev(pdev);
+
+	pr_info("pci device is removed (vendor=%#x) device=%#x)\n", pdev->vendor, pdev->device);
+}
+
+static struct pci_driver pci_driver = {
+	.name		= MXDMA_NODE_NAME,
+	.id_table	= pci_ids,
+	.probe		= __mxdma_driver_probe,
+	.remove		= __mxdma_driver_remove,
+};
+#endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 6)
 static char *mxdma_devnode(struct device *dev, umode_t *mode)
 #else
@@ -435,11 +477,19 @@ static int mxdma_init(void)
 
 	pr_info("MXDMA driver is loaded\n");
 
+#ifdef CONFIG_WO_CXL
+	return pci_register_driver(&pci_driver);
+#else
 	return 0;
+#endif
 }
 
 static void mxdma_exit(void)
 {
+#ifdef CONFIG_WO_CXL
+	pci_unregister_driver(&pci_driver);
+#endif
+
 	if (mxdma_class)
 		class_destroy(mxdma_class);
 
