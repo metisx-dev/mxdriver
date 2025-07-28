@@ -21,13 +21,13 @@ static irqreturn_t msi_irq_handler(int irq, void *data)
 	struct mx_event *mx_event;
 
 	mx_pdev = (struct mx_pci_dev *)data;
-	if (mx_pdev == NULL) {
+	if (!mx_pdev) {
 		pr_err("Invalid data\n");
 		goto out;
 	}
 
 	mx_event = &(mx_pdev->event);
-	if (mx_event == NULL) {
+	if (!mx_event) {
 		pr_err("Invalid event\n");
 		goto out;
 	}
@@ -39,18 +39,16 @@ out:
 	return IRQ_HANDLED;
 }
 
-static void pci_device_exit(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
+static void pci_device_exit(struct pci_dev *pdev)
 {
 	int irq = pci_irq_vector(pdev, 0);
 
 	free_irq(irq, NULL);
-
-	if (mx_pdev->has_regions)
-		pci_release_region(pdev, HMBOX_BAR_INDEX);
 }
 
-static int pci_device_init(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
+static int pci_device_init(struct mx_pci_dev* mx_pdev)
 {
+	struct pci_dev *pdev = mx_pdev->pdev;
 	int ret;
 
 	if (pci_is_enabled(pdev) == false) {
@@ -70,18 +68,12 @@ static int pci_device_init(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
 	if (!pdev->is_busmaster)
 		pci_set_master(pdev);
 
-	ret = pci_request_region(pdev, HMBOX_BAR_INDEX, MXDMA_NODE_NAME);
-	if (!ret)
-		mx_pdev->has_regions = true;
-
 	ret = pci_enable_msi(pdev);
 	if (ret) {
 		pr_err("Failed to pci_enable_msi (err=%d)\n", ret);
 	} else {
 		int irq = pci_irq_vector(pdev, 0);
 		pr_info("MSI enabled, irq=%d\n", irq);
-
-		mx_event_init(mx_pdev);
 
 		ret = request_threaded_irq(irq, msi_irq_handler, NULL, 0, MXDMA_NODE_NAME, mx_pdev);
 		if (ret) {
@@ -93,41 +85,37 @@ static int pci_device_init(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
 	return 0;
 }
 
-static void unmap_bars(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
+static void dev_unmap(struct mx_pci_dev *mx_pdev)
 {
-	if (!mx_pdev->hmbox_bar)
-		return;
+	struct pci_dev *pdev = mx_pdev->pdev;
 
-	pci_iounmap(pdev, mx_pdev->hmbox_bar);
+	if (mx_pdev->bar)
+		pci_iounmap(pdev, mx_pdev->bar);
+
+	pci_release_region(pdev, MXDMA_BAR_INDEX);
 }
 
-static int map_bars(struct mx_pci_dev *mx_pdev, struct pci_dev *pdev)
+static int dev_map(struct mx_pci_dev *mx_pdev)
 {
-	resource_size_t start = pci_resource_start(pdev, HMBOX_BAR_INDEX);
-	resource_size_t len = pci_resource_len(pdev, HMBOX_BAR_INDEX);
-	void __iomem *bar;
+	struct pci_dev *pdev = mx_pdev->pdev;
+	uint32_t size;
+	int ret;
 
-	if (len == 0) {
-		pr_err("HMBOX BAR is not available\n");
-		return -ENODEV;
+	ret = pci_request_region(pdev, MXDMA_BAR_INDEX, MXDMA_NODE_NAME);
+	if (ret) {
+		pr_err("Failed to pci_request_region (err=%d)\n", ret);
+		return ret;
 	}
 
-	if (len > INT_MAX) {
-		pr_info("Limit HMBOX BAR mapping from %llu to %d bytes\n", (uint64_t)len, INT_MAX);
-		len = (resource_size_t)INT_MAX;
+	size = pci_resource_len(pdev, MXDMA_BAR_INDEX);
+	mx_pdev->bar = pci_iomap(pdev, MXDMA_BAR_INDEX, size);
+	if (!mx_pdev->bar) {
+		pr_err("Failed to pci_iomap (size=%u)\n", size);
+		pci_release_region(pdev, MXDMA_BAR_INDEX);
+		return -ENOMEM;
 	}
 
-	bar = pci_iomap(pdev, HMBOX_BAR_INDEX, len);
-	if (!bar) {
-		pr_err("Failed to pci_iomap(%d)\n", HMBOX_BAR_INDEX);
-		return -ENODEV;
-	}
-
-	mx_pdev->hmbox_bar = bar;
-	mx_pdev->hmbox_size = (uint32_t)len;
-
-	pr_info("HMBOX BAR at %#llx is mapped at %#llx, length=%u\n",
-			(uint64_t)start, (uint64_t)mx_pdev->hmbox_bar, mx_pdev->hmbox_size);
+	mx_pdev->bar_mapped_size = size;
 
 	return 0;
 }
@@ -150,71 +138,9 @@ static int set_dma_addressing(struct pci_dev *pdev)
 	return 0;
 }
 
-static void mx_engine_exit(struct mx_engine *engine)
-{
-	int ret;
-
-	if (engine->submit.thread) {
-		ret = kthread_stop(engine->submit.thread);
-		if (ret)
-			pr_err("submit_thread thread doesn't stop properly (err=%d)\n", ret);
-	}
-
-	if (engine->complete.thread) {
-		ret = kthread_stop(engine->complete.thread);
-		if (ret)
-			pr_err("complete_thread thread doesn't stop properly (err=%d)\n", ret);
-	}
-}
-
-static int mx_engine_init(struct mx_engine *engine, void __iomem *bar, int dev_id)
-{
-	void __iomem *host_mbox_base = bar;
-	void __iomem *hifc_mbox_base = bar + (1 << 20); /* 1MB */
-	mbox_context_t ctx;
-
-	engine->magic = MAGIC_ENGINE;
-
-	/* Set up mailbox for submit */
-	engine->submit.ctx_addr = host_mbox_base + HIO_HOST_Q_OFFSET * sizeof(uint64_t);
-	ctx.u64 = readq(engine->submit.ctx_addr);
-	if (ctx.u64 == INVALID_CTX) {
-		pr_err("Invalid SQ context: %llx\n", ctx.u64);
-		return -ENXIO;
-	}
-
-	engine->submit.data_addr = hifc_mbox_base + sizeof(uint64_t) * ctx.data_base;
-	engine->submit.depth = POWER_OF_2(ctx.q_size);
-	pr_info("submit: ctx_addr=%#llx, data_addr=%#llx, ctx=%#llx\n",
-			(uint64_t)engine->submit.ctx_addr, (uint64_t)engine->submit.data_addr, ctx.u64);
-
-	spin_lock_init(&engine->submit.lock);
-	INIT_LIST_HEAD(&engine->submit.wait_list);
-	engine->submit.thread = kthread_run(mx_command_submit_handler, engine, "mx_submit_thread%d", dev_id);
-
-	/* Set up mailbox for complete */
-	engine->complete.ctx_addr = host_mbox_base + HIO_HOST_Q_OFFSET * sizeof(uint64_t) + HMBOX_RQ_OFFSET;
-	ctx.u64 = readq(engine->complete.ctx_addr);
-	if (ctx.u64 == INVALID_CTX) {
-		pr_err("Invalid CQ context: %llx\n", ctx.u64);
-		return -ENXIO;
-	}
-
-	engine->complete.data_addr = host_mbox_base + sizeof(uint64_t) * ctx.data_base;
-	engine->complete.depth = POWER_OF_2(ctx.q_size);
-	pr_info("complete: ctx_addr=%#llx, data_addr=%#llx, ctx=%#llx\n",
-			(uint64_t)engine->complete.ctx_addr, (uint64_t)engine->complete.data_addr, ctx.u64);
-
-	spin_lock_init(&engine->complete.lock);
-	INIT_LIST_HEAD(&engine->complete.wait_list);
-	engine->complete.thread = kthread_run(mx_command_complete_handler, engine, "mx_complete_thread%d", dev_id);
-
-	return 0;
-}
-
 static bool is_nowait_type(int type)
 {
-	if (type >= MXDMA_TYPE_DATA_NOWAIT && type <= MXDMA_TYPE_CQ_NOWAIT)
+	if (type >= MX_CDEV_DATA_NOWAIT && type <= MX_CDEV_CQ_NOWAIT)
 		return true;
 	return false;
 }
@@ -230,7 +156,7 @@ static int create_mx_cdev(struct mx_pci_dev *mx_pdev, int type)
 	mx_cdev->nowait = is_nowait_type(type);
 
 	cdev_init(&mx_cdev->cdev, mxdma_fops_array[type]);
-	kobject_set_name(&mx_cdev->cdev.kobj, node_name[type], mx_pdev->id);
+	kobject_set_name(&mx_cdev->cdev.kobj, node_name[type], mx_pdev->dev_id);
 
 	ret = cdev_add(&mx_cdev->cdev, mx_cdev->cdev_no, 1);
 	if (ret) {
@@ -301,14 +227,14 @@ static void destroy_mx_pdev(struct pci_dev *pdev)
 
 	dma_pool_destroy(mx_pdev->page_pool);
 
-	mx_engine_exit(&mx_pdev->engine);
+	mx_pdev->ops.release_queue(mx_pdev);
 
-	for (type = 0; type < NUM_OF_MXDMA_TYPE; type++)
+	for (type = 0; type < NUM_OF_MX_CDEV; type++)
 		destroy_mx_cdev(&mx_pdev->mx_cdev[type]);
 
-	pci_device_exit(mx_pdev, pdev);
-	unmap_bars(mx_pdev, pdev);
-	unregister_chrdev_region(mx_pdev->dev_no, NUM_OF_MXDMA_TYPE);
+	pci_device_exit(pdev);
+	dev_unmap(mx_pdev);
+	unregister_chrdev_region(mx_pdev->dev_no, NUM_OF_MX_CDEV);
 	devm_kfree(&pdev->dev, mx_pdev);
 	dev_set_drvdata(&pdev->dev, NULL);
 }
@@ -329,21 +255,32 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 
 	mx_pdev->magic = MAGIC_DEVICE;
 	mx_pdev->pdev = pdev;
-	mx_pdev->id = cxl_memdev_id;
+	mx_pdev->dev_id = cxl_memdev_id;
 
-	ret = alloc_chrdev_region(&mx_pdev->dev_no, 0, NUM_OF_MXDMA_TYPE, MXDMA_NODE_NAME);
+	if (pdev->revision == 0x1) {
+		register_mx_ops_v1(&mx_pdev->ops);
+		pr_info("PCI device revision 1 detected\n");
+	} else if (pdev->revision == 0x2) {
+		register_mx_ops_v2(&mx_pdev->ops);
+		pr_info("PCI device revision 2 detected\n");
+	} else {
+		pr_err("Unknown PCI device revision %d\n", pdev->revision);
+		return -EINVAL;
+	}
+
+	ret = alloc_chrdev_region(&mx_pdev->dev_no, 0, NUM_OF_MX_CDEV, MXDMA_NODE_NAME);
 	if (ret) {
 		pr_err("Failed to alloc_chrdev_region (err=%d)\n", ret);
 		goto out_fail;
 	}
 
-	ret = map_bars(mx_pdev, pdev);
+	ret = dev_map(mx_pdev);
 	if (ret) {
-		pr_err("Failed to map_bars (err=%d)\n", ret);
+		pr_err("Failed to dev_map (err=%d)\n", ret);
 		goto out_fail;
 	}
 
-	ret = pci_device_init(mx_pdev, pdev);
+	ret = pci_device_init(mx_pdev);
 	if (ret) {
 		pr_err("Failed to init_pdev (err=%d)\n", ret);
 		goto out_fail;
@@ -355,9 +292,15 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 		goto out_fail;
 	}
 
+	ret = mx_pdev->ops.init_queue(mx_pdev);
+	if (ret) {
+		pr_err("Failed to mx_queue_init (err=%d)\n", ret);
+		goto out_fail;
+	}
+
 	mx_event_init(mx_pdev);
 
-	for (type = 0; type < NUM_OF_MXDMA_TYPE; type++) {
+	for (type = 0; type < NUM_OF_MX_CDEV; type++) {
 		ret = create_mx_cdev(mx_pdev, type);
 		if (ret) {
 			pr_err("Failed to create mx_cdev (%s) (err=%d)\n", node_name[type], ret);
@@ -365,13 +308,8 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 		}
 	}
 
-	ret = mx_engine_init(&mx_pdev->engine, mx_pdev->hmbox_bar, mx_pdev->id);
-	if (ret) {
-		pr_err("Failed to mx_engine_init (err=%d)\n", ret);
-		goto out_fail;
-	}
-
-	mx_pdev->page_pool = dma_pool_create("mxdma_page_pool", &pdev->dev, SINGLE_DMA_SIZE, SINGLE_DMA_SIZE, 0);
+	mx_pdev->page_pool = dma_pool_create("mxdma_page_pool", &pdev->dev,
+			mx_pdev->page_size, mx_pdev->page_size, 0);
 
 	mxdma_device_online(pdev);
 

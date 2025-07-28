@@ -21,60 +21,24 @@
 #define MXDMA_NODE_NAME		"mx_dma"
 
 #define MAGIC_COMMAND		0x1234
-#define MAGIC_ENGINE	        0xEEEEEEEEUL
 #define MAGIC_CHAR		0xCCCCCCCCUL
 #define MAGIC_DEVICE		0xDDDDDDDDUL
 
-#define MXDMA_BAR_COUNT		8
-#define HMBOX_BAR_INDEX		2
+#define MXDMA_BAR_INDEX		2
 
-#define HMBOX_RQ_OFFSET		0x1000
-#define HIO_HOST_Q_OFFSET	48
-#define HMBOX_UPDATE_BITMASK	(1ull << 18)
-#define HMBOX_DB_OFFSET		4
-
-#define INVALID_CTX		0xFFFFFFFFFFFFFFFF
-
-#define POWER_OF_2(x)		(BIT(x))
-
-#define SINGLE_DMA_SIZE		(1 << 10) /* 1KB */
-#define NUM_OF_DESC_PER_LIST	(SINGLE_DMA_SIZE / sizeof(uint64_t))
-
-#define SQ_POLLING_MSEC		4
-#define CQ_POLLING_MSEC		4
+#define POLLING_INTERVAL_MSEC	4
 
 enum {
-	MXDMA_TYPE_DATA = 0,
-	MXDMA_TYPE_CONTEXT,
-	MXDMA_TYPE_SQ,
-	MXDMA_TYPE_CQ,
-	MXDMA_TYPE_DATA_NOWAIT,
-	MXDMA_TYPE_CONTEXT_NOWAIT,
-	MXDMA_TYPE_SQ_NOWAIT,
-	MXDMA_TYPE_CQ_NOWAIT,
-	MXDMA_TYPE_EVENT,
-	NUM_OF_MXDMA_TYPE,
-};
-
-enum {
-	MXDMA_OP_DATA_READ = 0,
-	MXDMA_OP_DATA_WRITE,
-	MXDMA_OP_CONTEXT_READ,
-	MXDMA_OP_CONTEXT_WRITE,
-	MXDMA_OP_SQ_READ,
-	MXDMA_OP_SQ_WRITE,
-	MXDMA_OP_CQ_READ,
-	MXDMA_OP_CQ_WRITE,
-};
-
-enum {
-	MXDMA_TRANSFER_START = 0,
-	MXDMA_TRANSFER_COMPLETE,
-};
-
-enum {
-	MXDMA_PAGE_MODE_SINGLE = 0,
-	MXDMA_PAGE_MODE_MULTI,
+	MX_CDEV_DATA = 0,
+	MX_CDEV_CONTEXT,
+	MX_CDEV_SQ,
+	MX_CDEV_CQ,
+	MX_CDEV_DATA_NOWAIT,
+	MX_CDEV_CONTEXT_NOWAIT,
+	MX_CDEV_SQ_NOWAIT,
+	MX_CDEV_CQ_NOWAIT,
+	MX_CDEV_EVENT,
+	NUM_OF_MX_CDEV,
 };
 
 static const char * const node_name[] = {
@@ -89,62 +53,47 @@ static const char * const node_name[] = {
 	MXDMA_NODE_NAME "%d_event",
 };
 
-typedef union {
-	struct {
-		uint8_t index :7;
-		uint8_t phase :1;
-	};
-	uint8_t full;
-} mbox_index_t;
+enum {
+	ADMIN_OPCODE_CREATE_IO_CQ = 0,
+	ADMIN_OPCODE_DELETE_IO_CQ,
+	ADMIN_OPCODE_CREATE_IO_SQ,
+	ADMIN_OPCODE_DELETE_IO_SQ,
+};
 
-typedef union {
-	struct {
-		uint64_t mid : 8;
-		uint64_t ctx_base : 16;
-		uint64_t data_base : 16;
-		uint64_t q_size : 4;
-		uint64_t data_size : 4;
-		uint64_t tail : 8;
-		uint64_t head : 8;
-	};
-	uint64_t u64;
-	uint32_t u32[2];
-} mbox_context_t;
+enum {
+	IO_OPCODE_DATA_READ = 0,
+	IO_OPCODE_DATA_WRITE,
+	IO_OPCODE_CONTEXT_READ,
+	IO_OPCODE_CONTEXT_WRITE,
+	IO_OPCODE_SQ_READ,
+	IO_OPCODE_SQ_WRITE,
+	IO_OPCODE_CQ_READ,
+	IO_OPCODE_CQ_WRITE,
+};
 
-struct mx_command {
-	union {
-		struct {
-			uint64_t magic : 16;
-			uint64_t opcode : 4;
-			uint64_t control : 4;
-			uint64_t page_mode : 2;
-			uint64_t id : 16;
-			uint64_t barrier_index : 6;
-			uint64_t rsvd : 14;
-			uint64_t nowait : 2;
-		};
-		uint64_t header;
-	};
-	uint64_t length;
-	uint64_t device_addr;
-	/*
-	 * if page_mode == MXDMA_PAGE_MOODE_SINGLE, host_addr
-	 * if page_mode == MXDMA_PAGE_MODE_MULTI, next_desc_list_addr
-	 * if db read/write, doorbell_value
-	 */
-	uint64_t host_addr;
-} __packed;
+static const char * const mxdma_op_name[] = {
+	"R_DATA(0)",
+	"W_DATA(1)",
+	"R_CTX(2)",
+	"W_CTX(3)",
+	"R_SQ(4)",
+	"W_SQ(5)",
+	"R_CQ(6)",
+	"W_CQ(7)",
+};
 
 struct mx_transfer {
+	uint16_t id;
 	void __user *user_addr;
 	size_t size;
 	uint64_t device_addr;
 	enum dma_data_direction dir;
 	bool nowait;
 
-	struct mx_command cmd;
+	void *command;
 	struct list_head entry;
 	struct completion done;
+	uint64_t result;
 
 	/* Used for data transfer */
 	struct sg_table sgt;
@@ -155,20 +104,9 @@ struct mx_transfer {
 	dma_addr_t *desc_list_ba;
 };
 
-struct mx_mbox {
-	void __iomem *ctx_addr;
-	void __iomem *data_addr;
-	uint64_t depth;
-
-	struct list_head wait_list;
-	struct task_struct *thread;
-	spinlock_t lock;
-};
-
-struct mx_engine {
-	unsigned long magic;
-	struct mx_mbox submit;
-	struct mx_mbox complete;
+struct mx_event {
+	atomic_t count;
+	wait_queue_head_t wq;
 };
 
 struct mx_char_dev {
@@ -181,30 +119,43 @@ struct mx_char_dev {
 	bool enabled;
 };
 
-struct mx_event {
-	atomic_t count;
-	wait_queue_head_t wq;
+struct mx_queue {
+	struct list_head sq_list;
+	spinlock_t sq_lock;
 };
+
+struct mx_operations {
+	int (*init_queue) (struct mx_pci_dev *);
+	int (*release_queue) (struct mx_pci_dev *);
+	void * (*create_command_sg) (struct device *, struct mx_transfer *, int);
+	void * (*create_command_ctrl) (struct mx_transfer *, int);
+} __randomize_layout;
 
 struct mx_pci_dev {
 	unsigned long magic;
-	int id;
+	int dev_id;
 	dev_t dev_no;
 
 	struct pci_dev *pdev;
-	bool has_regions;
 	bool enabled;
 
-	void __iomem *hmbox_bar;
-	uint32_t hmbox_size;
+	void __iomem *bar;
+	uint32_t bar_mapped_size;
+
+	struct mx_operations ops;
 
 	struct mx_event event;
 
-	struct mx_engine engine;
+	struct mx_queue *admin_queue;
+	struct mx_queue *io_queue;
+
+	struct task_struct *submit_thread;
+	struct task_struct *complete_thread;
 
 	int num_of_cdev;
-	struct mx_char_dev mx_cdev[NUM_OF_MXDMA_TYPE];
+	struct mx_char_dev mx_cdev[NUM_OF_MX_CDEV];
 
+	size_t page_size;
 	struct dma_pool *page_pool;
 };
 
@@ -217,21 +168,16 @@ int transfer_id_alloc(void *ptr);
 void transfer_id_free(unsigned long id);
 void *find_transfer_by_id(unsigned long id);
 
-ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
+ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode);
 ssize_t write_data_to_device_parallel(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
 
-ssize_t read_data_from_device(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
+ssize_t read_data_from_device(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode);
 ssize_t write_data_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
 
-ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
+ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode);
 ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
 
-int mx_command_submit_handler(void *arg);
-int mx_command_complete_handler(void *arg);
+int desc_list_alloc(struct device *dev, struct mx_transfer *transfer, int list_cnt);
 
-#ifdef CONFIG_DEBUG_DMA
-#define pr_debug_dma(fmt, ...) pr_info(fmt, ##__VA_ARGS__)
-#else
-#define pr_debug_dma(fmt, ...) do { } while (0)
-#endif
-
+void register_mx_ops_v1(struct mx_operations *ops);
+void register_mx_ops_v2(struct mx_operations *ops);
