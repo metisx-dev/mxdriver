@@ -230,9 +230,10 @@ static void mx_transfer_queue(struct mx_queue *queue, struct mx_transfer *transf
 	spin_lock_irqsave(&queue->sq_lock, flags);
 	list_add_tail(&transfer->entry, &queue->sq_list);
 	spin_unlock_irqrestore(&queue->sq_lock, flags);
+	swake_up_one(&queue->sq_wait);
 }
 
-static int mx_transfer_wait(struct mx_transfer *transfer)
+static int mx_transfer_wait(struct mx_queue *queue, struct mx_transfer *transfer)
 {
 	unsigned long left_time;
 
@@ -241,6 +242,7 @@ static int mx_transfer_wait(struct mx_transfer *transfer)
 		pr_warn("wait_for_completion is timeout (id=%u, user_addr=%#llx device_addr=%#llx size=%#llx, dir=%u)\n",
 				transfer->id, (uint64_t)transfer->user_addr, transfer->device_addr,
 				(uint64_t)transfer->size, transfer->dir);
+		atomic_dec(&queue->wait_count);
 		return -ETIMEDOUT;
 	}
 
@@ -259,7 +261,8 @@ static ssize_t mx_transfer_submit_sg(struct mx_pci_dev *mx_pdev,
 	}
 
 	mx_transfer_queue(mx_pdev->io_queue, transfer);
-	ret = mx_transfer_wait(transfer);
+	ret = mx_transfer_wait(mx_pdev->io_queue, transfer);
+
 	if (ret < 0)
 		pr_warn("Failed to wait mx_transfer (err=%ld)\n", ret);
 
@@ -286,7 +289,7 @@ static ssize_t mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
 	}
 
 	for (i = 0; i < count; i++) {
-		int ret = mx_transfer_wait(transfer[i]);
+		int ret = mx_transfer_wait(mx_pdev->io_queue, transfer[i]);
 		if (ret < 0)
 			pr_warn("Failed to wait mx_transfer (err=%d)\n", ret);
 		res += ret;
@@ -311,7 +314,7 @@ static ssize_t mx_transfer_submit_ctrl(struct mx_pci_dev *mx_pdev,
 	}
 
 	mx_transfer_queue(mx_pdev->io_queue, transfer);
-	ret = mx_transfer_wait(transfer);
+	ret = mx_transfer_wait(mx_pdev->io_queue, transfer);
 	if (ret < 0) {
 		pr_warn("Failed to wait mx_transfer (err=%ld)\n", ret);
 		return ret;

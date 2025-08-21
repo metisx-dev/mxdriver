@@ -1,7 +1,5 @@
 /* SPDX-License-Identifier: <SPDX License Expression> */
 
-#define pr_fmt(fmt) KBUILD_MODNAME ":%s: " fmt, __func__
-
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -14,6 +12,7 @@
 #include <linux/aer.h>
 #include <linux/kthread.h>
 #include <linux/poll.h>
+#include <linux/swait.h>
 
 #include <asm/current.h>
 #include <asm/cacheflush.h>
@@ -122,6 +121,9 @@ struct mx_char_dev {
 struct mx_queue {
 	struct list_head sq_list;
 	spinlock_t sq_lock;
+	atomic_t wait_count;
+	struct swait_queue_head sq_wait;
+	struct swait_queue_head cq_wait;
 };
 
 struct mx_operations {
