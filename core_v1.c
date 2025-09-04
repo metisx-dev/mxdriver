@@ -9,36 +9,6 @@ enum {
 	MXDMA_PAGE_MODE_MULTI,
 };
 
-typedef union {
-	struct {
-		uint8_t index :7;
-		uint8_t phase :1;
-	};
-	uint8_t full;
-} mbox_index_t;
-
-typedef union {
-	struct {
-		uint64_t mid : 8;
-		uint64_t ctx_base : 16;
-		uint64_t data_base : 16;
-		uint64_t q_size : 4;
-		uint64_t data_size : 4;
-		uint64_t tail : 8;
-		uint64_t head : 8;
-	};
-	uint64_t u64;
-	uint32_t u32[2];
-} mbox_context_t;
-
-struct mx_mbox {
-	void __iomem *ctx_addr;
-	void __iomem *data_addr;
-	void __iomem *db_addr;
-	mbox_context_t ctx;
-	uint32_t depth;
-};
-
 struct mx_queue_v1 {
 	struct mx_queue common;
 	struct mx_mbox sq_mbox;
@@ -71,100 +41,55 @@ struct mx_command {
 /******************************************************************************/
 /* Queue helpers                                                              */
 /******************************************************************************/
-static int get_free_space(struct mx_mbox *mbox)
-{
-	mbox_index_t head, tail;
-	uint32_t depth = mbox->depth;
-
-	head.full = mbox->ctx.head;
-	tail.full = mbox->ctx.tail;
-
-	return head.index - tail.index + depth * (1 - (head.phase ^ tail.phase));
-}
-
-static int get_pending_count(struct mx_mbox *mbox)
-{
-	mbox_index_t head, tail;
-	uint32_t depth = mbox->depth;
-
-	head.full = mbox->ctx.head;
-	tail.full = mbox->ctx.tail;
-
-	return tail.index - head.index + depth * (head.phase ^ tail.phase);
-}
-
 static bool is_pushable(struct mx_queue_v1 *queue)
 {
-	static uint64_t data_count = sizeof(struct mx_command) / sizeof(uint64_t);
+	static uint32_t data_count = sizeof(struct mx_command) / sizeof(uint64_t);
 	struct mx_mbox *mbox = &queue->sq_mbox;
+	uint32_t free_space;
 
-	mbox->ctx.u64 = readq(mbox->ctx_addr);
+	mbox->ctx.u64 = readq((void *)mbox->r_ctx_addr);
+	free_space = get_free_space(mbox);
 
-	return get_free_space(mbox) >= data_count;
+	return free_space >= data_count;
 }
 
 static bool is_popable(struct mx_queue_v1 *queue)
 {
-	static uint64_t data_count = sizeof(struct mx_command) / sizeof(uint64_t);
+	static uint32_t data_count = sizeof(struct mx_command) / sizeof(uint64_t);
 	struct mx_mbox *mbox = &queue->cq_mbox;
+	uint32_t pending_count;
 
 	if (atomic_read(&queue->common.wait_count) == 0)
 		return false;
 
-	mbox->ctx.u64 = readq(mbox->ctx_addr);
+	mbox->ctx.u64 = readq((void *)mbox->r_ctx_addr);
+	pending_count = get_pending_count(mbox);
 
-	return get_pending_count(mbox) >= data_count;
-}
-
-static uint8_t get_next_index(uint8_t _index, uint32_t count, uint32_t depth)
-{
-	mbox_index_t last, next;
-
-	last.full = _index;
-	next.full = _index;
-
-	next.index = (next.index + count) & (depth - 1);
-	if (count && (next.index <= last.index))
-		next.phase ^= 1;
-
-	return next.full;
-}
-
-static void __iomem *get_data_addr(void __iomem *base, uint8_t _db)
-{
-	mbox_index_t db;
-
-	db.full = _db;
-
-	return base + (sizeof(uint64_t) * db.index);
+	return pending_count >= data_count;
 }
 
 static void push_mx_command(struct mx_mbox *mbox, struct mx_command *comm)
 {
-	mbox_context_t ctx;
+	mbox_context_t *ctx = &mbox->ctx;
 	void __iomem *data_addr;
 
-	ctx.u64 = readq(mbox->ctx_addr);
-
-	data_addr = get_data_addr(mbox->data_addr, ctx.tail);
+	data_addr = (void *)mbox->data_addr + get_data_offset(ctx->tail);
 	memcpy_toio(data_addr, comm, sizeof(struct mx_command));
 
-	ctx.tail = get_next_index(ctx.tail, sizeof(struct mx_command) / sizeof(uint64_t), mbox->depth);
-	writel(ctx.u32[1], mbox->db_addr);
+	ctx->tail = get_next_index(ctx->tail, sizeof(struct mx_command) / sizeof(uint64_t), mbox->depth);
+	writeq(ctx->u64, (void *)mbox->w_ctx_addr);
 }
 
 static void pop_mx_command(struct mx_mbox *mbox, struct mx_command *comm)
 {
-	mbox_context_t ctx;
+	mbox_context_t *ctx = &mbox->ctx;
 	void __iomem *data_addr;
 
-	ctx.u64 = readq(mbox->ctx_addr);
-
-	data_addr = get_data_addr(mbox->data_addr, ctx.head);
+	data_addr = (void *)mbox->data_addr + get_data_offset(ctx->head);
 	memcpy_fromio(comm, data_addr, sizeof(struct mx_command));
 
-	ctx.head = get_next_index(ctx.head, sizeof(struct mx_command) / sizeof(uint64_t), mbox->depth);
-	writel(ctx.u32[1], mbox->db_addr);
+	ctx->head = get_next_index(ctx->head, sizeof(struct mx_command) / sizeof(uint64_t), mbox->depth);
+	writeq(ctx->u64, (void *)mbox->w_ctx_addr);
 }
 
 /******************************************************************************/
@@ -177,7 +102,7 @@ static int submit_handler(void *arg)
 	struct mx_transfer *transfer, *tmp;
 	unsigned long flags;
 
-	while (kthread_should_stop() == false) {
+	while (!kthread_should_stop()) {
 		__swait_event_interruptible_timeout(queue->common.sq_wait,
 				!list_empty(&queue->common.sq_list),
 				POLLING_INTERVAL_MSEC);
@@ -190,12 +115,8 @@ static int submit_handler(void *arg)
 			push_mx_command(sq_mbox, (struct mx_command*)transfer->command);
 			list_del(&transfer->entry);
 
-			if (transfer->nowait) {
-				complete(&transfer->done);
-			} else {
-				atomic_inc(&queue->common.wait_count);
-				swake_up_one(&queue->common.cq_wait);
-			}
+			atomic_inc(&queue->common.wait_count);
+			swake_up_one(&queue->common.cq_wait);
 		}
 		spin_unlock_irqrestore(&queue->common.sq_lock, flags);
 	}
@@ -210,7 +131,7 @@ static int complete_handler(void *arg)
 	struct mx_transfer *transfer;
 	struct mx_command comm;
 
-	while (kthread_should_stop() == false) {
+	while (!kthread_should_stop()) {
 		__swait_event_interruptible_timeout(queue->common.cq_wait,
 				atomic_read(&queue->common.wait_count) > 0,
 				POLLING_INTERVAL_MSEC);
@@ -266,7 +187,7 @@ static int get_list_count(int total_desc_cnt)
 	return list_cnt;
 }
 
-static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
+static uint64_t desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
 	struct sg_table *sgt = &transfer->sgt;
 	struct scatterlist *sg = sgt->sgl;
@@ -277,7 +198,7 @@ static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
 
 	total_desc_cnt = get_total_desc_count(transfer);
 	list_cnt = get_list_count(total_desc_cnt);
-	ret = desc_list_alloc(dev, transfer, list_cnt);
+	ret = desc_list_alloc(mx_pdev, transfer, list_cnt);
 	if (ret) {
 		pr_warn("Failed to desc_list_alloc (err=%d)\n", ret);
 		return 0;
@@ -330,14 +251,13 @@ static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opc
 	comm->magic = MAGIC_COMMAND;
 	comm->id = transfer->id;
 	comm->opcode = opcode;
-	comm->nowait = transfer->nowait ? 1 : 0;
 	comm->size = transfer->size;
 	comm->device_addr = transfer->device_addr;
 
 	return comm;
 }
 
-static void *create_mx_command_sg(struct device *dev, struct mx_transfer *transfer, int opcode)
+static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
 {
 	struct mx_command *comm;
 	struct sg_table *sgt = &transfer->sgt;
@@ -363,7 +283,7 @@ static void *create_mx_command_sg(struct device *dev, struct mx_transfer *transf
 		}
 	} else {
 		comm->page_mode = MXDMA_PAGE_MODE_MULTI;
-		comm->prp_entry1 = desc_list_init(dev, transfer);
+		comm->prp_entry1 = desc_list_init(mx_pdev, transfer);
 		if (!comm->prp_entry1) {
 			pr_warn("Failed to get desc_list_init\n");
 			kfree(comm);
@@ -384,15 +304,17 @@ static void *create_mx_command_ctrl(struct mx_transfer *transfer, int opcode)
 		return NULL;
 	}
 
-	if (transfer->dir == DMA_TO_DEVICE) {
-		uint64_t value = 0;
-		int ret = copy_from_user(&value, transfer->user_addr, transfer->size);
+	if (transfer->dir != DMA_TO_DEVICE)
+		return (void*)comm;
 
-		if (ret) {
-			pr_warn("Failed to copy_from_user (err=%d)\n", ret);
+	if (access_ok(transfer->user_addr, transfer->size)) {
+		if (copy_from_user(&comm->doorbell_value, transfer->user_addr, sizeof(uint64_t))) {
+			pr_warn("Failed to copy_from_user (%llx <- %llx)\n",
+					(uint64_t)&comm->doorbell_value, (uint64_t)transfer->user_addr);
 			return NULL;
 		}
-		comm->doorbell_value = value;
+	} else {
+		comm->doorbell_value = *(uint64_t *)transfer->user_addr;
 	}
 
 	return (void*)comm;
@@ -401,33 +323,20 @@ static void *create_mx_command_ctrl(struct mx_transfer *transfer, int opcode)
 /******************************************************************************/
 /* Init                                                                       */
 /******************************************************************************/
-#define HMBOX_UPDATE_BITMASK (1ull << 18)
-#define HMBOX_DB_OFFSET 4
-static int mx_mbox_init(struct mx_mbox *mbox, void __iomem *ctx_addr, void __iomem *data_addr)
-{
-	mbox->ctx_addr = ctx_addr;
-	mbox->ctx.u64 = readq(mbox->ctx_addr);
-	if (mbox->ctx.u64 == ULLONG_MAX) {
-		pr_err("Failed to read mbox context address\n");
-		return -EIO;
-	}
+#define HMBOX_HIO_QID		48
+#define HMBOX_RQ_OFFSET		0x1000
+#define HIFC_MBOX_BAR_OFFSET	(1ull << 20)
 
-	mbox->data_addr = data_addr + sizeof(uint64_t) * mbox->ctx.data_base;
-	mbox->db_addr = mbox->ctx_addr + HMBOX_UPDATE_BITMASK + HMBOX_DB_OFFSET;
-	mbox->depth = BIT(mbox->ctx.q_size);
-
-	return 0;
-}
-
-#define HMBOX_HIO_QID 48
-#define HMBOX_RQ_OFFSET 0x1000
 static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 {
-	struct mx_queue_v1 *queue = kzalloc(sizeof(struct mx_queue_v1), GFP_KERNEL);
+	struct device *dev = &mx_pdev->pdev->dev;
+	struct mx_queue_v1 *queue;
 	void __iomem *host_mbox_base, *hifc_mbox_base;
-	uint64_t q_offset = HMBOX_HIO_QID * sizeof(uint64_t);
-	int ret;
+	void __iomem *ctx_addr, *data_addr;
+	uint64_t q_offset;
+	uint64_t ctx;
 
+	queue = devm_kzalloc(dev, sizeof(struct mx_queue_v1), GFP_KERNEL);
 	if (!queue) {
 		pr_err("Failed to allocate memory for mx_queue_v1\n");
 		return -ENOMEM;
@@ -436,19 +345,26 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 	mx_pdev->page_size = SINGLE_DMA_SIZE;
 
 	host_mbox_base = mx_pdev->bar;
-	hifc_mbox_base = host_mbox_base + (1 << 20);
+	hifc_mbox_base = host_mbox_base + HIFC_MBOX_BAR_OFFSET;
+	q_offset = HMBOX_HIO_QID * sizeof(uint64_t);
 
-	ret = mx_mbox_init(&queue->sq_mbox, host_mbox_base + q_offset, hifc_mbox_base);
-	if (ret) {
-		pr_err("Failed to init sq_mbox (err=%d)\n", ret);
-		return ret;
+	ctx_addr = host_mbox_base + q_offset;
+	data_addr = hifc_mbox_base;
+	ctx = readq(ctx_addr);
+	if (ctx == ULLONG_MAX) {
+		pr_info("Invalid mbox context (ctx_addr = 0x%p)\n", ctx_addr);
+		return -EINVAL;
 	}
+	mx_mbox_init(&queue->sq_mbox, (uint64_t)ctx_addr, (uint64_t)data_addr, ctx);
 
-	ret = mx_mbox_init(&queue->cq_mbox, host_mbox_base + q_offset + HMBOX_RQ_OFFSET, host_mbox_base);
-	if (ret) {
-		pr_err("Failed to init cq_mbox (err=%d)\n", ret);
-		return ret;
+	ctx_addr += HMBOX_RQ_OFFSET;
+	data_addr = host_mbox_base;
+	ctx = readq(ctx_addr);
+	if (ctx == ULLONG_MAX) {
+		pr_info("Invalid mbox context (ctx_addr = 0x%p)\n", ctx_addr);
+		return -EINVAL;
 	}
+	mx_mbox_init(&queue->cq_mbox, (uint64_t)ctx_addr, (uint64_t)data_addr, ctx);
 
 	spin_lock_init(&queue->common.sq_lock);
 	INIT_LIST_HEAD(&queue->common.sq_list);
@@ -479,8 +395,6 @@ static int release_mx_queue(struct mx_pci_dev *mx_pdev)
 		if (ret)
 			pr_err("complete_thread thread doesn't stop properly (err=%d)\n", ret);
 	}
-
-	kfree(mx_pdev->io_queue);
 
 	return ret;
 }

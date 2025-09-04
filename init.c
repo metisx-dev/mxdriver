@@ -235,7 +235,6 @@ static void destroy_mx_pdev(struct pci_dev *pdev)
 	pci_device_exit(pdev);
 	dev_unmap(mx_pdev);
 	unregister_chrdev_region(mx_pdev->dev_no, NUM_OF_MX_CDEV);
-	devm_kfree(&pdev->dev, mx_pdev);
 	dev_set_drvdata(&pdev->dev, NULL);
 }
 

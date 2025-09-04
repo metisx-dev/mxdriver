@@ -25,6 +25,9 @@
 
 #define MXDMA_BAR_INDEX		2
 
+#define MAX_NUM_OF_MBOX		80
+#define HMBOX_UPDATE_BITMASK	(1ull << 18)
+
 #define POLLING_INTERVAL_MSEC	4
 
 enum {
@@ -36,6 +39,7 @@ enum {
 	MX_CDEV_CONTEXT_NOWAIT,
 	MX_CDEV_SQ_NOWAIT,
 	MX_CDEV_CQ_NOWAIT,
+	MX_CDEV_IOCTL,
 	MX_CDEV_EVENT,
 	NUM_OF_MX_CDEV,
 };
@@ -49,6 +53,7 @@ static const char * const node_name[] = {
 	MXDMA_NODE_NAME "%d_context_nowait",
 	MXDMA_NODE_NAME "%d_sq_nowait",
 	MXDMA_NODE_NAME "%d_cq_nowait",
+	MXDMA_NODE_NAME "%d_ioctl",
 	MXDMA_NODE_NAME "%d_event",
 };
 
@@ -81,13 +86,45 @@ static const char * const mxdma_op_name[] = {
 	"W_CQ(7)",
 };
 
+typedef union {
+	struct {
+		uint8_t index :7;
+		uint8_t phase :1;
+	};
+	uint8_t full;
+} mbox_index_t;
+
+typedef union {
+	struct {
+		uint64_t mid : 8;
+		uint64_t ctx_base : 16;
+		uint64_t data_base : 16;
+		uint64_t q_size : 4;
+		uint64_t data_size : 4;
+		uint64_t tail : 8;
+		uint64_t head : 8;
+	};
+	uint64_t u64;
+} mbox_context_t;
+
+struct mx_mbox {
+	uint64_t r_ctx_addr;
+	uint64_t w_ctx_addr;
+	uint64_t data_addr;
+	mbox_context_t ctx;
+	uint32_t depth;
+	spinlock_t lock;
+};
+
 struct mx_transfer {
 	uint16_t id;
 	void __user *user_addr;
 	size_t size;
 	uint64_t device_addr;
 	enum dma_data_direction dir;
-	bool nowait;
+
+	struct mx_pci_dev *mx_pdev;
+	struct work_struct work;
 
 	void *command;
 	struct list_head entry;
@@ -129,7 +166,7 @@ struct mx_queue {
 struct mx_operations {
 	int (*init_queue) (struct mx_pci_dev *);
 	int (*release_queue) (struct mx_pci_dev *);
-	void * (*create_command_sg) (struct device *, struct mx_transfer *, int);
+	void * (*create_command_sg) (struct mx_pci_dev *, struct mx_transfer *, int);
 	void * (*create_command_ctrl) (struct mx_transfer *, int);
 } __randomize_layout;
 
@@ -150,6 +187,9 @@ struct mx_pci_dev {
 
 	struct mx_queue *admin_queue;
 	struct mx_queue *io_queue;
+
+	struct mx_mbox *sq_mbox_list[MAX_NUM_OF_MBOX];
+	struct mx_mbox *cq_mbox_list[MAX_NUM_OF_MBOX];
 
 	struct task_struct *submit_thread;
 	struct task_struct *complete_thread;
@@ -179,7 +219,17 @@ ssize_t write_data_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf,
 ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode);
 ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
 
-int desc_list_alloc(struct device *dev, struct mx_transfer *transfer, int list_cnt);
+long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long arg);
+
+int desc_list_alloc(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int list_cnt);
 
 void register_mx_ops_v1(struct mx_operations *ops);
 void register_mx_ops_v2(struct mx_operations *ops);
+
+bool is_empty(struct mx_mbox *mbox);
+bool is_full(struct mx_mbox *mbox);
+uint32_t get_free_space(struct mx_mbox *mbox);
+uint32_t get_pending_count(struct mx_mbox *mbox);
+uint8_t get_next_index(uint8_t _index, uint32_t count, uint32_t depth);
+uint32_t get_data_offset(uint8_t _db);
+void mx_mbox_init(struct mx_mbox *mbox, uint64_t ctx_addr, uint64_t data_addr, uint64_t ctx);

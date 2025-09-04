@@ -66,39 +66,23 @@ struct mx_completion
 /******************************************************************************/
 /* Queue helpers                                                              */
 /******************************************************************************/
-static bool is_sqe_full(struct mx_queue_v2 *queue)
+static bool is_pushable(struct mx_queue_v2 *queue)
 {
-       return (queue->sq_tail + 1) % queue->depth == queue->sq_head;
+       return (queue->sq_tail + 1) % queue->depth != queue->sq_head;
 }
 
-static bool is_cqe_pending(struct mx_queue_v2 *queue)
+static bool is_popable(struct mx_queue_v2 *queue)
 {
-	struct mx_completion *cqe = &queue->cqes[queue->cq_head];
-	uint16_t status = le16_to_cpu(READ_ONCE(cqe->status));
-	uint16_t phase = (status >> 15) & 1;
+	struct mx_completion *cqe;
+	uint16_t status, phase;
 
+	if (atomic_read(&queue->common.wait_count) <= 0)
+		return false;
+
+	cqe = &queue->cqes[queue->cq_head];
+	status = le16_to_cpu(READ_ONCE(cqe->status));
+	phase = (status >> 15) & 1;
 	return phase == queue->cq_phase;
-}
-
-static int push_mx_command(struct mx_queue_v2 *queue, struct mx_command *comm)
-{
-	if (is_sqe_full(queue))
-		return -EAGAIN;
-
-	memcpy(&queue->sqes[queue->sq_tail], comm, sizeof(struct mx_command));
-
-	return 0;
-}
-
-static int pop_mx_completion(struct mx_queue_v2 *queue, struct mx_completion *cmpl)
-{
-	if (!is_cqe_pending(queue))
-		return -EAGAIN;
-
-	memcpy(cmpl, &queue->cqes[queue->cq_head], sizeof(struct mx_completion));
-	queue->sq_head = cmpl->sq_head;
-
-	return 0;
 }
 
 static void update_sq_doorbell(struct mx_queue_v2 *queue)
@@ -114,12 +98,26 @@ static void update_sq_doorbell(struct mx_queue_v2 *queue)
 static void update_cq_doorbell(struct mx_queue_v2 *queue)
 {
 	uint32_t next_head = queue->cq_head + 1;
+
 	if (next_head == queue->depth) {
 		queue->cq_head = 0;
 		queue->cq_phase ^= 1;
 	} else {
 		queue->cq_head = next_head;
 	}
+}
+
+static void push_mx_command(struct mx_queue_v2 *queue, struct mx_command *comm)
+{
+	memcpy(&queue->sqes[queue->sq_tail], comm, sizeof(struct mx_command));
+	update_sq_doorbell(queue);
+}
+
+static void pop_mx_completion(struct mx_queue_v2 *queue, struct mx_completion *cmpl)
+{
+	memcpy(cmpl, &queue->cqes[queue->cq_head], sizeof(struct mx_completion));
+	queue->sq_head = cmpl->sq_head;
+	update_cq_doorbell(queue);
 }
 
 static void ring_sq_doorbell(struct mx_queue_v2 *queue)
@@ -152,16 +150,14 @@ static int submit_handler(void *arg)
 
 		spin_lock_irqsave(&queue->common.sq_lock, flags);
 		list_for_each_entry_safe(transfer, tmp, &queue->common.sq_list, entry) {
+			if (!is_pushable(queue))
+				break;
+
 			push_mx_command(queue, transfer->command);
-			update_sq_doorbell(queue);
 			list_del(&transfer->entry);
 
-			if (transfer->nowait) {
-				complete(&transfer->done);
-			} else {
-				atomic_inc(&queue->common.wait_count);
-				swake_up_one(&queue->common.cq_wait);
-			}
+			atomic_inc(&queue->common.wait_count);
+			swake_up_one(&queue->common.cq_wait);
 		}
 		spin_unlock_irqrestore(&queue->common.sq_lock, flags);
 
@@ -176,29 +172,25 @@ static int complete_handler(void *arg)
 	struct mx_queue_v2 *queue = (struct mx_queue_v2 *)arg;
 	struct mx_transfer *transfer;
 	struct mx_completion cmpl;
-	int ret;
 
 	while (!kthread_should_stop()) {
 		__swait_event_interruptible_timeout(queue->common.cq_wait,
 				atomic_read(&queue->common.wait_count) > 0,
 				POLLING_INTERVAL_MSEC);
 
-		if (atomic_read(&queue->common.wait_count) <= 0)
-			continue;
+		while (is_popable(queue)) {
+			pop_mx_completion(queue, &cmpl);
+			atomic_dec(&queue->common.wait_count);
 
-		do {
-			ret = pop_mx_completion(queue, &cmpl);
 			transfer = find_transfer_by_id(cmpl.command_id);
-			if (transfer && !transfer->nowait) {
-				transfer->result = cmpl.result;
-				complete(&transfer->done);
-			}
+			if (!transfer)
+				continue;
 
-			update_cq_doorbell(queue);
-		} while (!ret);
+			transfer->result = cmpl.result;
+			complete(&transfer->done);
+		}
 
 		ring_cq_doorbell(queue);
-
 	}
 
 	return 0;
@@ -223,7 +215,7 @@ static int get_list_count(int pages_nr)
 	return list_cnt;
 }
 
-static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
+static uint64_t desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
 	struct sg_table *sgt = &transfer->sgt;
 	struct scatterlist *sg;
@@ -233,7 +225,7 @@ static uint64_t desc_list_init(struct device *dev, struct mx_transfer *transfer)
 	int i;
 
 	list_cnt = get_list_count(transfer->pages_nr);
-	ret = desc_list_alloc(dev, transfer, list_cnt);
+	ret = desc_list_alloc(mx_pdev, transfer, list_cnt);
 	if (ret) {
 		pr_warn("Failed to desc_list_alloc (err=%d)\n", ret);
 		return 0;
@@ -280,7 +272,7 @@ static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opc
 	return comm;
 }
 
-static void *create_mx_command_sg(struct device *dev, struct mx_transfer *transfer, int opcode)
+static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
 {
 	struct mx_command *comm;
 	struct sg_table *sgt = &transfer->sgt;
@@ -309,7 +301,7 @@ static void *create_mx_command_sg(struct device *dev, struct mx_transfer *transf
 			return NULL;
 		}
 	} else {
-		comm->prp_entry2 = desc_list_init(dev, transfer);
+		comm->prp_entry2 = desc_list_init(mx_pdev, transfer);
 		if (!comm->prp_entry2) {
 			pr_warn("Failed to desc_list_init\n");
 			kfree(comm);
@@ -330,15 +322,17 @@ static void *create_mx_command_ctrl(struct mx_transfer *transfer, int opcode)
 		return NULL;
 	}
 
-	if (transfer->dir == DMA_TO_DEVICE) {
-		uint64_t value = 0;
-		int ret = copy_from_user(&value, transfer->user_addr, transfer->size);
+	if (transfer->dir != DMA_TO_DEVICE)
+		return (void*)comm;
 
-		if (ret) {
-			pr_warn("Failed to copy_from_user (err=%d)\n", ret);
+	if (access_ok(transfer->user_addr, transfer->size)) {
+		if (copy_from_user(&comm->doorbell_value, transfer->user_addr, sizeof(uint64_t))) {
+			pr_warn("Failed to copy_from_user (%llx <- %llx)\n",
+					(uint64_t)&comm->doorbell_value, (uint64_t)transfer->user_addr);
 			return NULL;
 		}
-		comm->doorbell_value = value;
+	} else {
+		comm->doorbell_value = *(uint64_t *)transfer->user_addr;
 	}
 
 	return (void*)comm;
@@ -350,34 +344,16 @@ static void *create_mx_command_ctrl(struct mx_transfer *transfer, int opcode)
 static int alloc_queue(struct device *dev, struct mx_queue_v2 *queue, uint32_t q_depth)
 {
 	queue->depth = q_depth;
-	queue->cqes = dma_alloc_coherent(dev, queue->depth * sizeof(struct mx_completion), &queue->cq_dma_addr, GFP_KERNEL);
+	queue->cqes = dmam_alloc_coherent(dev, queue->depth * sizeof(struct mx_completion), &queue->cq_dma_addr, GFP_KERNEL);
 	if (!queue->cqes)
 		return -ENOMEM;
 
-	queue->sqes = dma_alloc_coherent(dev, queue->depth * sizeof(struct mx_command), &queue->sq_dma_addr, GFP_KERNEL);
+	queue->sqes = dmam_alloc_coherent(dev, queue->depth * sizeof(struct mx_command), &queue->sq_dma_addr, GFP_KERNEL);
 	if (!queue->sqes)
-		dma_free_coherent(dev, queue->depth * sizeof(struct mx_completion), (void *)queue->cqes, queue->cq_dma_addr);
+		return -ENOMEM;
 
 	pr_info("Allocated queue (depth=%u, sq_dma_addr=0x%llx, cq_dma_addr=0x%llx, sqes=0x%llx, cqes=0x%llx)\n",
 			queue->depth, queue->sq_dma_addr, queue->cq_dma_addr, (uint64_t)queue->sqes, (uint64_t)queue->cqes);
-
-	return 0;
-}
-
-static int release_queue(struct device *dev, struct mx_queue_v2 *queue)
-{
-	if (!queue->cqes || !queue->sqes)
-		return -EINVAL;
-
-	dma_free_coherent(dev, queue->depth * sizeof(struct mx_completion), (void *)queue->cqes, queue->cq_dma_addr);
-	dma_free_coherent(dev, queue->depth * sizeof(struct mx_command), (void *)queue->sqes, queue->sq_dma_addr);
-
-	queue->cqes = NULL;
-	queue->sqes = NULL;
-	queue->cq_dma_addr = 0;
-	queue->sq_dma_addr = 0;
-
-	kfree(queue);
 
 	return 0;
 }
@@ -400,7 +376,7 @@ static void configure_queue(struct mx_pci_dev *mx_pdev, struct mx_queue_v2 *queu
 static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
 {
 	struct device *dev = &mx_pdev->pdev->dev;
-	struct mx_queue_v2 *queue = kzalloc(sizeof(struct mx_queue_v2), GFP_KERNEL);
+	struct mx_queue_v2 *queue = devm_kzalloc(dev, sizeof(struct mx_queue_v2), GFP_KERNEL);
 	uint32_t aqa;
 	int ret;
 
@@ -425,45 +401,44 @@ static int configure_admin_queue(struct mx_pci_dev *mx_pdev)
 	return 0;
 }
 
-static int release_admin_queue(struct mx_pci_dev *mx_pdev)
-{
-	return release_queue(&mx_pdev->pdev->dev, (struct mx_queue_v2 *)mx_pdev->admin_queue);
-}
-
 static int submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c, uint64_t *result)
 {
 	struct mx_completion cmpl;
-	int ret;
+	int timeout = 500;
+	int count = 0;
 
-	ret = push_mx_command(queue, c);
-	if (ret)
-		return ret;
-
-	update_sq_doorbell(queue);
+	for (count = 0; count < timeout; count++) {
+		if (is_pushable(queue))
+			break;
+		msleep(1);
+	}
+	push_mx_command(queue, c);
 	ring_sq_doorbell(queue);
+	atomic_inc(&queue->common.wait_count);
 
-	do {
-		ret = pop_mx_completion(queue, &cmpl);
-	} while (ret);
-
-	update_cq_doorbell(queue);
+	for (count = 0; count < timeout; count++) {
+		if (is_popable(queue))
+			break;
+		msleep(1);
+	}
+	pop_mx_completion(queue, &cmpl);
 	ring_cq_doorbell(queue);
 
 	if (result)
 		*result = cmpl.result;
 
-	return 0;
+	return count < timeout;
 }
 
 static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 {
 	struct device *dev = &mx_pdev->pdev->dev;
 	struct mx_queue_v2 *admin_queue = (struct mx_queue_v2 *)mx_pdev->admin_queue;
-	struct mx_queue_v2 *io_queue = kzalloc(sizeof(struct mx_queue_v2), GFP_KERNEL);
+	struct mx_queue_v2 *io_queue = devm_kzalloc(dev, sizeof(struct mx_queue_v2), GFP_KERNEL);
 	struct mx_command comm = {};
 	uint64_t result;
 	uint16_t cq_id, sq_id;
-	int ret;
+	bool ret;
 
 	pr_info("Configuring IO queue...\n");
 
@@ -474,26 +449,20 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	comm.opcode = ADMIN_OPCODE_CREATE_IO_CQ;
 	comm.host_addr = cpu_to_le64(io_queue->cq_dma_addr);
 	comm.io_queue_info.depth = io_queue->depth;
-	do {
-		ret = submit_sync_command(admin_queue, &comm, &result);
-	} while (ret == -EAGAIN);
-	if (ret) {
-		pr_err("Failed to create IO completion queue (err=%d)\n", ret);
-		release_queue(dev, io_queue);
-		return ret;
+	ret = submit_sync_command(admin_queue, &comm, &result);
+	if (!ret) {
+		pr_err("Failed to create IO completion queue\n");
+		return -EIO;
 	}
 	cq_id = le16_to_cpu(result);
 
 	comm.opcode = ADMIN_OPCODE_CREATE_IO_SQ;
 	comm.host_addr = cpu_to_le64(io_queue->sq_dma_addr);
 	comm.io_queue_info.cq_id = cq_id;
-	do {
-		ret = submit_sync_command(admin_queue, &comm, &result);
-	} while (ret == -EAGAIN);
-	if (ret) {
-		pr_err("Failed to create IO submission queue (err=%d)\n", ret);
-		release_queue(dev, io_queue);
-		return ret;
+	ret = submit_sync_command(admin_queue, &comm, &result);
+	if (!ret) {
+		pr_err("Failed to create IO submission queue\n");
+		return -EIO;
 	}
 	sq_id = le16_to_cpu(result);
 
@@ -522,7 +491,6 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 
 static int release_io_queue(struct mx_pci_dev *mx_pdev)
 {
-	struct device *dev = &mx_pdev->pdev->dev;
 	struct mx_queue_v2 *admin_queue = (struct mx_queue_v2 *)mx_pdev->admin_queue;
 	struct mx_queue_v2 *io_queue = (struct mx_queue_v2 *)mx_pdev->io_queue;
 	struct mx_command comm = {};
@@ -547,10 +515,6 @@ static int release_io_queue(struct mx_pci_dev *mx_pdev)
 		pr_err("Failed to delete IO submission queue (err=%d)\n", ret);
 		return ret;
 	}
-
-	ret = release_queue(dev, io_queue);
-	if (ret)
-		pr_err("Failed to release IO queue (err=%d)\n", ret);
 
 	if (mx_pdev->submit_thread) {
 		ret = kthread_stop(mx_pdev->submit_thread);
@@ -582,7 +546,6 @@ static int init_mx_queue(struct mx_pci_dev *mx_pdev)
 	ret = configure_io_queue(mx_pdev);
 	if (ret) {
 		pr_err("Failed to configure IO queue (err=%d)\n", ret);
-		release_admin_queue(mx_pdev);
 		return ret;
 	}
 
@@ -597,12 +560,6 @@ static int release_mx_queue(struct mx_pci_dev *mx_pdev)
 	ret = release_io_queue(mx_pdev);
 	if (ret) {
 		pr_err("Failed to release IO queue (err=%d)\n", ret);
-		return ret;
-	}
-
-	ret = release_admin_queue(mx_pdev);
-	if (ret) {
-		pr_err("Failed to release admin queue (err=%d)\n", ret);
 		return ret;
 	}
 
