@@ -4,28 +4,27 @@
 
 struct mx_ioctl_mbox_info
 {
-    uint32_t qid;
-    uint64_t sq_ctx_addr;
-    uint64_t sq_data_addr;
-    uint64_t cq_ctx_addr;
-    uint64_t cq_data_addr;
+	uint32_t qid;
+	uint64_t sq_ctx_addr;
+	uint64_t sq_data_addr;
+	uint64_t cq_ctx_addr;
+	uint64_t cq_data_addr;
 };
 
 struct mx_ioctl_send_cmd
 {
-    uint32_t qid;
-    uint64_t *cmd;
-
-    void *user_addr;
-    uint64_t device_addr;
-    size_t size;
+	uint32_t qid;
+	uint64_t *cmd;
+	void *user_addr;
+	uint64_t device_addr;
+	size_t size;
 };
 
 struct mx_ioctl_recv_cmd
 {
-    uint32_t qid;
-    uint32_t nr_cmds;
-    uint64_t *cmds;
+	uint32_t qid;
+	uint32_t nr_cmds;
+	uint64_t *cmds;
 };
 
 #define MX_IOCTL_MAGIC		'X'
@@ -112,10 +111,8 @@ static long ioctl_send_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
 {
 	struct mx_ioctl_send_cmd send_cmd;
 	struct mx_mbox *sq_mbox;
-	mbox_context_t ctx;
 	unsigned long flags;
 	uint64_t data_addr;
-	bool done = false;
 
 	if (copy_from_user(&send_cmd, (void __user *)arg, sizeof(send_cmd)))
 		return -EFAULT;
@@ -124,28 +121,24 @@ static long ioctl_send_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
 		return -EINVAL;
 
 	if (send_cmd.user_addr && send_cmd.size > 0)
-		write_data_to_device_parallel(mx_pdev, send_cmd.user_addr, send_cmd.size, &send_cmd.device_addr, IO_OPCODE_DATA_WRITE, true);
+		write_data_to_device(mx_pdev, send_cmd.user_addr, send_cmd.size, &send_cmd.device_addr, IO_OPCODE_DATA_WRITE, true);
 
 	sq_mbox = mx_pdev->sq_mbox_list[send_cmd.qid];
 
-	while (!done) {
+	while (is_full(sq_mbox)) {
+		mbox_context_t ctx;
+
 		read_ctrl_from_device(mx_pdev, (char __user *)&ctx.u64, sizeof(uint64_t), (loff_t *)&sq_mbox->r_ctx_addr, IO_OPCODE_SQ_READ);
 		sq_mbox->ctx.head = ctx.head;
-
-		spin_lock_irqsave(&sq_mbox->lock, flags);
-		if (is_full(sq_mbox)) {
-			spin_unlock_irqrestore(&sq_mbox->lock, flags);
-			continue;
-		}
-
-		data_addr = sq_mbox->data_addr + get_data_offset(sq_mbox->ctx.tail);
-		sq_mbox->ctx.tail = get_next_index(sq_mbox->ctx.tail, 1, sq_mbox->depth);
-		spin_unlock_irqrestore(&sq_mbox->lock, flags);
-
-		write_data_to_device(mx_pdev, (const char __user *)send_cmd.cmd, sizeof(uint64_t), (loff_t *)&data_addr, IO_OPCODE_CONTEXT_WRITE, true);
-		write_ctrl_to_device(mx_pdev, (const char __user *)&sq_mbox->ctx.u64, sizeof(uint64_t), (loff_t *)&sq_mbox->w_ctx_addr, IO_OPCODE_SQ_WRITE, true);
-		done = true;
 	}
+
+	spin_lock_irqsave(&sq_mbox->lock, flags);
+	data_addr = sq_mbox->data_addr + get_data_offset(sq_mbox->ctx.tail);
+	sq_mbox->ctx.tail = get_next_index(sq_mbox->ctx.tail, 1, sq_mbox->depth);
+	spin_unlock_irqrestore(&sq_mbox->lock, flags);
+
+	write_data_to_device(mx_pdev, (const char __user *)send_cmd.cmd, sizeof(uint64_t), (loff_t *)&data_addr, IO_OPCODE_CONTEXT_WRITE, true);
+	write_ctrl_to_device(mx_pdev, (const char __user *)&sq_mbox->ctx.u64, sizeof(uint64_t), (loff_t *)&sq_mbox->w_ctx_addr, IO_OPCODE_SQ_WRITE, true);
 
 	return 0;
 }
