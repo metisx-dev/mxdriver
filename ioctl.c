@@ -135,10 +135,10 @@ static long ioctl_send_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	spin_lock_irqsave(&sq_mbox->lock, flags);
 	data_addr = sq_mbox->data_addr + get_data_offset(sq_mbox->ctx.tail);
 	sq_mbox->ctx.tail = get_next_index(sq_mbox->ctx.tail, 1, sq_mbox->depth);
-	spin_unlock_irqrestore(&sq_mbox->lock, flags);
 
-	write_data_to_device(mx_pdev, (const char __user *)send_cmd.cmd, sizeof(uint64_t), (loff_t *)&data_addr, IO_OPCODE_CONTEXT_WRITE, true);
+	write_ctrl_to_device(mx_pdev, (const char __user *)send_cmd.cmd, sizeof(uint64_t), (loff_t *)&data_addr, IO_OPCODE_CQ_WRITE, true);
 	write_ctrl_to_device(mx_pdev, (const char __user *)&sq_mbox->ctx.u64, sizeof(uint64_t), (loff_t *)&sq_mbox->w_ctx_addr, IO_OPCODE_SQ_WRITE, true);
+	spin_unlock_irqrestore(&sq_mbox->lock, flags);
 
 	return 0;
 }
