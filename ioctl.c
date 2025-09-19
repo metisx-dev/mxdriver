@@ -111,7 +111,6 @@ static long ioctl_send_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
 {
 	struct mx_ioctl_send_cmd send_cmd;
 	struct mx_mbox *sq_mbox;
-	unsigned long flags;
 	uint64_t data_addr;
 
 	if (copy_from_user(&send_cmd, (void __user *)arg, sizeof(send_cmd)))
@@ -125,6 +124,7 @@ static long ioctl_send_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
 
 	sq_mbox = mx_pdev->sq_mbox_list[send_cmd.qid];
 
+	mutex_lock(&sq_mbox->lock);
 	while (is_full(sq_mbox)) {
 		mbox_context_t ctx;
 
@@ -132,13 +132,12 @@ static long ioctl_send_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
 		sq_mbox->ctx.head = ctx.head;
 	}
 
-	spin_lock_irqsave(&sq_mbox->lock, flags);
 	data_addr = sq_mbox->data_addr + get_data_offset(sq_mbox->ctx.tail);
 	sq_mbox->ctx.tail = get_next_index(sq_mbox->ctx.tail, 1, sq_mbox->depth);
 
-	write_ctrl_to_device(mx_pdev, (const char __user *)send_cmd.cmd, sizeof(uint64_t), (loff_t *)&data_addr, IO_OPCODE_CQ_WRITE, true);
+	write_data_to_device(mx_pdev, (const char __user *)send_cmd.cmd, sizeof(uint64_t), (loff_t *)&data_addr, IO_OPCODE_CONTEXT_WRITE, true);
 	write_ctrl_to_device(mx_pdev, (const char __user *)&sq_mbox->ctx.u64, sizeof(uint64_t), (loff_t *)&sq_mbox->w_ctx_addr, IO_OPCODE_SQ_WRITE, true);
-	spin_unlock_irqrestore(&sq_mbox->lock, flags);
+	mutex_unlock(&sq_mbox->lock);
 
 	return 0;
 }
@@ -161,7 +160,6 @@ static long ioctl_recv_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	struct mx_ioctl_recv_cmd recv_cmd;
 	struct mx_mbox *cq_mbox;
 	mbox_context_t ctx;
-	unsigned long flags;
 	uint64_t data_addr;
 	uint32_t count = 0;
 
@@ -179,9 +177,9 @@ static long ioctl_recv_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	read_ctrl_from_device(mx_pdev, (char __user *)&ctx.u64, sizeof(uint64_t), (loff_t *)&cq_mbox->r_ctx_addr, IO_OPCODE_CQ_READ);
 	cq_mbox->ctx.tail = ctx.tail;
 
-	spin_lock_irqsave(&cq_mbox->lock, flags);
+	mutex_lock(&cq_mbox->lock);
 	if (is_empty(cq_mbox)) {
-		spin_unlock_irqrestore(&cq_mbox->lock, flags);
+		mutex_unlock(&cq_mbox->lock);
 		goto out;
 	}
 
@@ -191,10 +189,10 @@ static long ioctl_recv_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
 
 	data_addr = cq_mbox->data_addr + get_data_offset(cq_mbox->ctx.head);
 	cq_mbox->ctx.head = get_next_index(cq_mbox->ctx.head, count, cq_mbox->depth);
-	spin_unlock_irqrestore(&cq_mbox->lock, flags);
 
 	read_data_from_device(mx_pdev, (char __user *)recv_cmd.cmds, count * sizeof(uint64_t), (loff_t *)&data_addr, IO_OPCODE_CONTEXT_READ);
 	write_ctrl_to_device(mx_pdev, (const char __user *)&cq_mbox->ctx.u64, sizeof(uint64_t), (loff_t *)&cq_mbox->w_ctx_addr, IO_OPCODE_CQ_WRITE, true);
+	mutex_unlock(&cq_mbox->lock);
 
 out:
 	recv_cmd.nr_cmds = count;

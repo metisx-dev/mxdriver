@@ -67,4 +67,5 @@ void mx_mbox_init(struct mx_mbox *mbox, uint64_t ctx_addr, uint64_t data_addr, u
 	mbox->w_ctx_addr = ctx_addr | HMBOX_UPDATE_BITMASK;
 	mbox->data_addr = data_addr + sizeof(uint64_t) * mbox->ctx.data_base;
 	mbox->depth = BIT(mbox->ctx.q_size);
+	mutex_init(&mbox->lock);
 }

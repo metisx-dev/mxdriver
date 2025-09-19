@@ -113,7 +113,7 @@ struct mx_mbox {
 	uint64_t data_addr;
 	mbox_context_t ctx;
 	uint32_t depth;
-	spinlock_t lock;
+	struct mutex lock;
 };
 
 struct mx_transfer {
