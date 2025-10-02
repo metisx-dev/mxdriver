@@ -32,13 +32,8 @@
 
 enum {
 	MX_CDEV_DATA = 0,
-	MX_CDEV_CONTEXT,
-	MX_CDEV_SQ,
-	MX_CDEV_CQ,
 	MX_CDEV_DATA_NOWAIT,
-	MX_CDEV_CONTEXT_NOWAIT,
-	MX_CDEV_SQ_NOWAIT,
-	MX_CDEV_CQ_NOWAIT,
+	MX_CDEV_CONTEXT,
 	MX_CDEV_IOCTL,
 	MX_CDEV_EVENT,
 	NUM_OF_MX_CDEV,
@@ -46,13 +41,8 @@ enum {
 
 static const char * const node_name[] = {
 	MXDMA_NODE_NAME "%d_data",
-	MXDMA_NODE_NAME "%d_context",
-	MXDMA_NODE_NAME "%d_sq",
-	MXDMA_NODE_NAME "%d_cq",
 	MXDMA_NODE_NAME "%d_data_nowait",
-	MXDMA_NODE_NAME "%d_context_nowait",
-	MXDMA_NODE_NAME "%d_sq_nowait",
-	MXDMA_NODE_NAME "%d_cq_nowait",
+	MXDMA_NODE_NAME "%d_context",
 	MXDMA_NODE_NAME "%d_ioctl",
 	MXDMA_NODE_NAME "%d_event",
 };

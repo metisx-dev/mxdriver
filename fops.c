@@ -114,48 +114,6 @@ static ssize_t mxdma_device_read_context(struct file *file, char __user *buf, si
 	return read_data_from_device(mx_pdev, buf, count, pos, IO_OPCODE_CONTEXT_READ);
 }
 
-static ssize_t mxdma_device_read_sq(struct file *file, char __user *buf, size_t count, loff_t *pos)
-{
-	struct mx_char_dev *mx_cdev;
-	struct mx_pci_dev *mx_pdev;
-	int ret;
-
-	if (count != sizeof(uint64_t)) {
-		pr_warn("size of data to read is not supported: %zu\n", count);
-		return -EINVAL;
-	}
-
-	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
-	if (ret)
-		return ret;
-
-	if (mx_cdev->nowait)
-		return -EINVAL;
-
-	return read_ctrl_from_device(mx_pdev, buf, count, pos, IO_OPCODE_SQ_READ);
-}
-
-static ssize_t mxdma_device_read_cq(struct file *file, char __user *buf, size_t count, loff_t *pos)
-{
-	struct mx_char_dev *mx_cdev;
-	struct mx_pci_dev *mx_pdev;
-	int ret;
-
-	if (count != sizeof(uint64_t)) {
-		pr_warn("size of data to read is not supported: %zu\n", count);
-		return -EINVAL;
-	}
-
-	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
-	if (ret)
-		return ret;
-
-	if (mx_cdev->nowait)
-		return -EINVAL;
-
-	return read_ctrl_from_device(mx_pdev, buf, count, pos, IO_OPCODE_CQ_READ);
-}
-
 static ssize_t mxdma_device_write_data(struct file *file, const char __user *buf, size_t count, loff_t *pos)
 {
 	struct mx_char_dev *mx_cdev;
@@ -190,42 +148,6 @@ static ssize_t mxdma_device_write_context(struct file *file, const char __user *
 		return ret;
 
 	return write_data_to_device(mx_pdev, buf, count, pos, IO_OPCODE_CONTEXT_WRITE, mx_cdev->nowait);
-}
-
-static ssize_t mxdma_device_write_sq(struct file *file, const char __user *buf, size_t count, loff_t *pos)
-{
-	struct mx_char_dev *mx_cdev;
-	struct mx_pci_dev *mx_pdev;
-	int ret;
-
-	if (count != sizeof(uint32_t)) {
-		pr_warn("size of data to write is not supported: %zu\n", count);
-		return -EINVAL;
-	}
-
-	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
-	if (ret)
-		return ret;
-
-	return write_ctrl_to_device(mx_pdev, buf, count, pos, IO_OPCODE_SQ_WRITE, mx_cdev->nowait);
-}
-
-static ssize_t mxdma_device_write_cq(struct file *file, const char __user *buf, size_t count, loff_t *pos)
-{
-	struct mx_char_dev *mx_cdev;
-	struct mx_pci_dev *mx_pdev;
-	int ret;
-
-	if (count != sizeof(uint32_t)) {
-		pr_warn("size of data to write is not supported: %zu\n", count);
-		return -EINVAL;
-	}
-
-	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
-	if (ret)
-		return ret;
-
-	return write_ctrl_to_device(mx_pdev, buf, count, pos, IO_OPCODE_CQ_WRITE, mx_cdev->nowait);
 }
 
 static long mxdma_device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
@@ -278,20 +200,6 @@ struct file_operations mxdma_fops_context = {
 	.write = mxdma_device_write_context,
 };
 
-struct file_operations mxdma_fops_sq = {
-	.open = mxdma_device_open,
-	.release = mxdma_device_release,
-	.read = mxdma_device_read_sq,
-	.write = mxdma_device_write_sq,
-};
-
-struct file_operations mxdma_fops_cq = {
-	.open = mxdma_device_open,
-	.release = mxdma_device_release,
-	.read = mxdma_device_read_cq,
-	.write = mxdma_device_write_cq,
-};
-
 struct file_operations mxdma_fops_ioctl = {
 	.open = mxdma_device_open,
 	.release = mxdma_device_release,
@@ -306,13 +214,8 @@ struct file_operations mxdma_fops_event = {
 
 struct file_operations *mxdma_fops_array[] = {
 	[MX_CDEV_DATA] = &mxdma_fops_data,
-	[MX_CDEV_CONTEXT] = &mxdma_fops_context,
-	[MX_CDEV_SQ] = &mxdma_fops_sq,
-	[MX_CDEV_CQ] = &mxdma_fops_cq,
 	[MX_CDEV_DATA_NOWAIT] = &mxdma_fops_data,
-	[MX_CDEV_CONTEXT_NOWAIT] = &mxdma_fops_context,
-	[MX_CDEV_SQ_NOWAIT] = &mxdma_fops_sq,
-	[MX_CDEV_CQ_NOWAIT] = &mxdma_fops_cq,
+	[MX_CDEV_CONTEXT] = &mxdma_fops_context,
 	[MX_CDEV_IOCTL] = &mxdma_fops_ioctl,
 	[MX_CDEV_EVENT] = &mxdma_fops_event,
 };
