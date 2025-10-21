@@ -11,7 +11,7 @@ struct mx_ioctl_mbox_info
 	uint64_t cq_data_addr;
 };
 
-struct mx_ioctl_send_cmd
+struct mx_ioctl_cmd_with_data
 {
 	uint32_t qid;
 	uint64_t *cmd;
@@ -20,18 +20,45 @@ struct mx_ioctl_send_cmd
 	size_t size;
 };
 
-struct mx_ioctl_recv_cmd
+struct mx_ioctl_cmds
 {
 	uint32_t qid;
 	uint32_t nr_cmds;
 	uint64_t *cmds;
 };
 
-#define MX_IOCTL_MAGIC		'X'
-#define MX_IOCTL_REGISTER_MBOX	_IOW(MX_IOCTL_MAGIC, 1, struct mx_ioctl_mbox_info)
-#define MX_IOCTL_INIT_MBOX	_IOW(MX_IOCTL_MAGIC, 2, uint32_t)
-#define MX_IOCTL_SEND_CMD	_IOW(MX_IOCTL_MAGIC, 3, struct mx_ioctl_send_cmd)
-#define MX_IOCTL_RECV_CMD	_IOWR(MX_IOCTL_MAGIC, 4, struct mx_ioctl_recv_cmd)
+#define MX_IOCTL_MAGIC			'X'
+#define MX_IOCTL_REGISTER_MBOX		_IOW(MX_IOCTL_MAGIC, 1, struct mx_ioctl_mbox_info)
+#define MX_IOCTL_INIT_MBOX		_IOW(MX_IOCTL_MAGIC, 2, uint32_t)
+#define MX_IOCTL_SEND_CMD_WITH_DATA	_IOW(MX_IOCTL_MAGIC, 3, struct mx_ioctl_cmd_with_data)
+#define MX_IOCTL_RECV_CMDS		_IOWR(MX_IOCTL_MAGIC, 4, struct mx_ioctl_cmds)
+#define MX_IOCTL_SEND_CMDS		_IOWR(MX_IOCTL_MAGIC, 5, struct mx_ioctl_cmds)
+
+static uint32_t get_pushable_count(struct mx_mbox *mbox)
+{
+	mbox_index_t head, tail;
+
+	head.full = mbox->ctx.head;
+	tail.full = mbox->ctx.tail;
+
+	if (head.phase == tail.phase)
+		return mbox->depth - tail.index;
+	else
+		return head.index - tail.index;
+}
+
+static uint32_t get_popable_count(struct mx_mbox *mbox)
+{
+	mbox_index_t head, tail;
+
+	head.full = mbox->ctx.head;
+	tail.full = mbox->ctx.tail;
+
+	if (head.phase == tail.phase)
+		return tail.index - head.index;
+	else
+		return mbox->depth - head.index;
+}
 
 static struct mx_mbox *create_mx_mbox(struct mx_pci_dev *mx_pdev, uint64_t ctx_addr, uint64_t data_addr)
 {
@@ -107,9 +134,9 @@ static long ioctl_init_mbox(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	return 0;
 }
 
-static long ioctl_send_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
+static long ioctl_send_cmd_with_data(struct mx_pci_dev *mx_pdev, unsigned long arg)
 {
-	struct mx_ioctl_send_cmd send_cmd;
+	struct mx_ioctl_cmd_with_data send_cmd;
 	struct mx_mbox *sq_mbox;
 	uint64_t data_addr;
 
@@ -142,22 +169,52 @@ static long ioctl_send_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	return 0;
 }
 
-static uint32_t get_popable_count(struct mx_mbox *mbox)
+static long ioctl_send_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 {
-	mbox_index_t head, tail;
+	struct mx_ioctl_cmds send_cmd;
+	struct mx_mbox *sq_mbox;
+	mbox_context_t ctx;
+	uint64_t data_addr;
+	uint32_t count = 0;
 
-	head.full = mbox->ctx.head;
-	tail.full = mbox->ctx.tail;
+	if (copy_from_user(&send_cmd, (void __user *)arg, sizeof(send_cmd)))
+		return -EFAULT;
 
-	if (head.index < tail.index)
-		return tail.index - head.index;
-	else
-		return mbox->depth - head.index;
+	if (send_cmd.qid >= MAX_NUM_OF_MBOX || !mx_pdev->sq_mbox_list[send_cmd.qid])
+		return -EINVAL;
+
+	sq_mbox = mx_pdev->sq_mbox_list[send_cmd.qid];
+
+	mutex_lock(&sq_mbox->lock);
+	read_ctrl_from_device(mx_pdev, (char __user *)&ctx.u64, sizeof(uint64_t), (loff_t *)&sq_mbox->r_ctx_addr, IO_OPCODE_SQ_READ);
+	sq_mbox->ctx.head = ctx.head;
+
+	count = get_pushable_count(sq_mbox);
+	if (count == 0)
+		goto out;
+
+	if (count > send_cmd.nr_cmds)
+		count = send_cmd.nr_cmds;
+
+	data_addr = sq_mbox->data_addr + get_data_offset(sq_mbox->ctx.tail);
+	sq_mbox->ctx.tail = get_next_index(sq_mbox->ctx.tail, count, sq_mbox->depth);
+
+	write_data_to_device(mx_pdev, (const char __user *)send_cmd.cmds, sizeof(uint64_t) * count, (loff_t *)&data_addr, IO_OPCODE_CONTEXT_WRITE, true);
+	write_ctrl_to_device(mx_pdev, (const char __user *)&sq_mbox->ctx.u64, sizeof(uint64_t), (loff_t *)&sq_mbox->w_ctx_addr, IO_OPCODE_SQ_WRITE, true);
+
+out:
+	mutex_unlock(&sq_mbox->lock);
+
+	send_cmd.nr_cmds = count;
+	if (copy_to_user((void __user *)arg, &send_cmd, sizeof(send_cmd)))
+		return -EFAULT;
+
+	return 0;
 }
 
-static long ioctl_recv_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
+static long ioctl_recv_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 {
-	struct mx_ioctl_recv_cmd recv_cmd;
+	struct mx_ioctl_cmds recv_cmd;
 	struct mx_mbox *cq_mbox;
 	mbox_context_t ctx;
 	uint64_t data_addr;
@@ -178,10 +235,8 @@ static long ioctl_recv_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	cq_mbox->ctx.tail = ctx.tail;
 
 	mutex_lock(&cq_mbox->lock);
-	if (is_empty(cq_mbox)) {
-		mutex_unlock(&cq_mbox->lock);
+	if (is_empty(cq_mbox))
 		goto out;
-	}
 
 	count = get_popable_count(cq_mbox);
 	if (count > recv_cmd.nr_cmds)
@@ -192,9 +247,10 @@ static long ioctl_recv_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
 
 	read_data_from_device(mx_pdev, (char __user *)recv_cmd.cmds, count * sizeof(uint64_t), (loff_t *)&data_addr, IO_OPCODE_CONTEXT_READ);
 	write_ctrl_to_device(mx_pdev, (const char __user *)&cq_mbox->ctx.u64, sizeof(uint64_t), (loff_t *)&cq_mbox->w_ctx_addr, IO_OPCODE_CQ_WRITE, true);
-	mutex_unlock(&cq_mbox->lock);
 
 out:
+	mutex_unlock(&cq_mbox->lock);
+
 	recv_cmd.nr_cmds = count;
 	if (copy_to_user((void __user *)arg, &recv_cmd, sizeof(recv_cmd)))
 		return -EFAULT;
@@ -209,10 +265,12 @@ long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long
 			return ioctl_register_mbox(mx_pdev, arg);
 		case MX_IOCTL_INIT_MBOX:
 			return ioctl_init_mbox(mx_pdev, arg);
-		case MX_IOCTL_SEND_CMD:
-			return ioctl_send_cmd(mx_pdev, arg);
-		case MX_IOCTL_RECV_CMD:
-			return ioctl_recv_cmd(mx_pdev, arg);
+		case MX_IOCTL_SEND_CMD_WITH_DATA:
+			return ioctl_send_cmd_with_data(mx_pdev, arg);
+		case MX_IOCTL_RECV_CMDS:
+			return ioctl_recv_cmds(mx_pdev, arg);
+		case MX_IOCTL_SEND_CMDS:
+			return ioctl_send_cmds(mx_pdev, arg);
 		default:
 			pr_warn("unknown ioctl cmd(%u)\n", cmd);
 			return -EINVAL;
