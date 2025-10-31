@@ -57,10 +57,10 @@ struct mx_command {
 struct mx_completion
 {
 	uint64_t result;
-	uint16_t sq_id;
 	uint16_t sq_head;
-	uint16_t status;
+	uint16_t sq_id;
 	uint16_t command_id;
+	uint16_t status;
 } __packed;
 
 /******************************************************************************/
@@ -81,7 +81,7 @@ static bool is_popable(struct mx_queue_v2 *queue)
 
 	cqe = &queue->cqes[queue->cq_head];
 	status = le16_to_cpu(READ_ONCE(cqe->status));
-	phase = (status >> 15) & 1;
+	phase = status & 0x1;
 	return phase == queue->cq_phase;
 }
 
@@ -131,7 +131,7 @@ static void ring_sq_doorbell(struct mx_queue_v2 *queue)
 
 static void ring_cq_doorbell(struct mx_queue_v2 *queue)
 {
-	writel(queue->cq_head, queue->db + sizeof(uint64_t));
+	writel(queue->cq_head, queue->db + sizeof(uint32_t));
 }
 
 /******************************************************************************/
@@ -202,10 +202,26 @@ static int complete_handler(void *arg)
 #define SINGLE_DMA_SIZE		PAGE_SIZE
 #define NUM_OF_DESC_PER_LIST	(SINGLE_DMA_SIZE / sizeof(uint64_t))
 
-static int get_list_count(int pages_nr)
+static int get_total_desc_count(struct mx_transfer *transfer)
+{
+	struct sg_table *sgt = &transfer->sgt;
+	struct scatterlist *sg = sgt->sgl;
+	int total_desc_cnt = 0;
+	int i;
+
+	for_each_sgtable_dma_sg(sgt, sg, i) {
+		int len = sg_dma_len(sg);
+		int desc_cnt = (len + SINGLE_DMA_SIZE - 1) / SINGLE_DMA_SIZE;
+
+		total_desc_cnt += desc_cnt;
+	}
+
+	return total_desc_cnt - 1; // Exclude the first PRP entry
+}
+
+static int get_list_count(int total_desc_cnt)
 {
 	int list_cnt = 1;
-	int total_desc_cnt = pages_nr - 1;
 
 	while (total_desc_cnt > NUM_OF_DESC_PER_LIST) {
 		total_desc_cnt -= (NUM_OF_DESC_PER_LIST - 1);
@@ -218,13 +234,14 @@ static int get_list_count(int pages_nr)
 static uint64_t desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
 	struct sg_table *sgt = &transfer->sgt;
-	struct scatterlist *sg;
+	struct scatterlist *sg = sgt->sgl;
 	uint64_t *desc;
-	int list_cnt, list_idx, desc_idx;
+	int total_desc_cnt, list_cnt, list_idx, desc_idx;
 	int ret;
 	int i;
 
-	list_cnt = get_list_count(transfer->pages_nr);
+	total_desc_cnt = get_total_desc_count(transfer);
+	list_cnt = get_list_count(total_desc_cnt);
 	ret = desc_list_alloc(mx_pdev, transfer, list_cnt);
 	if (ret) {
 		pr_warn("Failed to desc_list_alloc (err=%d)\n", ret);
@@ -237,19 +254,37 @@ static uint64_t desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *t
 
 	for_each_sgtable_dma_sg(sgt, sg, i) {
 		dma_addr_t dma_addr = sg_dma_address(sg);
+		ssize_t dma_size = sg_dma_len(sg);
+		ssize_t offset = sg->offset;
+		ssize_t len = SINGLE_DMA_SIZE;
 
-		if (i == 0)
-			continue;
+		if (offset) {
+			ssize_t tmp = (PAGE_SIZE - offset) & (SINGLE_DMA_SIZE - 1);
+			if (tmp != 0) {
+				len = tmp;
+			}
+		}
 
-		if (desc_idx == NUM_OF_DESC_PER_LIST - 1) {
-			if (sg_next(sg)) {
+		// First entry is handled outside of the loop
+		if (i == 0) {
+			dma_addr += len;
+			dma_size -= len;
+			len = min_t(ssize_t, dma_size, SINGLE_DMA_SIZE);
+		}
+
+		while (dma_size > 0) {
+			if (desc_idx == NUM_OF_DESC_PER_LIST - 1 && total_desc_cnt > 1) {
 				desc[desc_idx] = (uint64_t)transfer->desc_list_ba[++list_idx];
 				desc = (uint64_t *)transfer->desc_list_va[list_idx];
 				desc_idx = 0;
 			}
-		}
 
-		desc[desc_idx++] = dma_addr;
+			desc[desc_idx++] = dma_addr;
+			dma_addr += len;
+			dma_size -= len;
+			len = min_t(ssize_t, dma_size, SINGLE_DMA_SIZE);
+			total_desc_cnt--;
+		}
 	}
 
 	return transfer->desc_list_ba[0];
@@ -294,7 +329,10 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 	if (transfer->pages_nr == 1) {
 		comm->prp_entry2 = 0;
 	} else if (transfer->pages_nr == 2) {
-		comm->prp_entry2 = sg_dma_address(sg_next(sg));
+		if (sg_dma_len(sg) + sg->offset > SINGLE_DMA_SIZE)
+			comm->prp_entry2 = (comm->prp_entry1 + SINGLE_DMA_SIZE) - sg->offset;
+		else
+			comm->prp_entry2 = sg_dma_address(sg_next(sg));
 		if (!comm->prp_entry2) {
 			pr_warn("Failed to get sg_dma_address\n");
 			kfree(comm);
@@ -367,7 +405,7 @@ static void configure_queue(struct mx_pci_dev *mx_pdev, struct mx_queue_v2 *queu
 	queue->sq_head = 0;
 	queue->cq_head = 0;
 	queue->cq_phase = 1;
-	queue->db = &dbs[qid * 2];
+	queue->db = &dbs[qid];
 	memset((void *)queue->cqes, 0, queue->depth * sizeof(struct mx_completion));
 	memset((void *)queue->sqes, 0, queue->depth * sizeof(struct mx_command));
 	wmb();
