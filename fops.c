@@ -186,6 +186,33 @@ static unsigned int mxdma_device_poll(struct file *file, poll_table *wait)
 	return 0;
 }
 
+static ssize_t mxdma_bdf_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
+{
+	struct mx_char_dev *mx_cdev = file->private_data;
+	struct mx_pci_dev *mx_pdev;
+	struct pci_dev *pdev;
+	char bdf_str[32];
+	int len;
+
+	if (!mx_cdev || !mx_cdev->mx_pdev)
+		return -ENODEV;
+
+	mx_pdev = mx_cdev->mx_pdev;
+	pdev = mx_pdev->pdev;
+
+	len = scnprintf(bdf_str, sizeof(bdf_str), "%s\n", dev_name(&pdev->dev));
+
+	return simple_read_from_buffer(buf, count, ppos, bdf_str, len);
+}
+
+static int mxdma_bdf_open(struct inode *inode, struct file *file)
+{
+	struct mx_char_dev *mx_cdev;
+	mx_cdev = container_of(inode->i_cdev, struct mx_char_dev, cdev);
+	file->private_data = mx_cdev;
+	return 0;
+}
+
 struct file_operations mxdma_fops_data = {
 	.open = mxdma_device_open,
 	.release = mxdma_device_release,
@@ -212,11 +239,17 @@ struct file_operations mxdma_fops_event = {
 	.poll = mxdma_device_poll,
 };
 
+struct file_operations mxdma_fops_bdf = {
+	.open = mxdma_bdf_open,
+	.read = mxdma_bdf_read,
+};
+
 struct file_operations *mxdma_fops_array[] = {
 	[MX_CDEV_DATA] = &mxdma_fops_data,
 	[MX_CDEV_DATA_NOWAIT] = &mxdma_fops_data,
 	[MX_CDEV_CONTEXT] = &mxdma_fops_context,
 	[MX_CDEV_IOCTL] = &mxdma_fops_ioctl,
 	[MX_CDEV_EVENT] = &mxdma_fops_event,
+	[MX_CDEV_BDF] = &mxdma_fops_bdf,
 };
 

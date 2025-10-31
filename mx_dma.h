@@ -36,6 +36,7 @@ enum {
 	MX_CDEV_CONTEXT,
 	MX_CDEV_IOCTL,
 	MX_CDEV_EVENT,
+	MX_CDEV_BDF,
 	NUM_OF_MX_CDEV,
 };
 
@@ -45,6 +46,7 @@ static const char * const node_name[] = {
 	MXDMA_NODE_NAME "%d_context",
 	MXDMA_NODE_NAME "%d_ioctl",
 	MXDMA_NODE_NAME "%d_event",
+	MXDMA_NODE_NAME "%d_bdf",
 };
 
 enum {
