@@ -39,11 +39,14 @@ out:
 	return IRQ_HANDLED;
 }
 
-static void pci_device_exit(struct pci_dev *pdev)
+static void pci_device_exit(struct mx_pci_dev* mx_pdev)
 {
+	struct pci_dev *pdev = mx_pdev->pdev;
 	int irq = pci_irq_vector(pdev, 0);
 
-	free_irq(irq, NULL);
+	free_irq(irq, mx_pdev);
+
+	pci_disable_msi(pdev);
 }
 
 static int pci_device_init(struct mx_pci_dev* mx_pdev)
@@ -225,9 +228,9 @@ static void destroy_mx_pdev(struct pci_dev *pdev)
 	for (type = 0; type < NUM_OF_MX_CDEV; type++)
 		destroy_mx_cdev(&mx_pdev->mx_cdev[type]);
 
-	pci_device_exit(pdev);
 	dev_unmap(mx_pdev);
 	unregister_chrdev_region(mx_pdev->dev_no, NUM_OF_MX_CDEV);
+	pci_device_exit(mx_pdev);
 	dev_set_drvdata(&pdev->dev, NULL);
 }
 
