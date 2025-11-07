@@ -18,6 +18,7 @@
 #include <asm/cacheflush.h>
 
 #define MXDMA_NODE_NAME		"mx_dma"
+#define XCENA_PCI_VENDOR_ID	0x20A6
 
 #define MAGIC_COMMAND		0x1234
 #define MAGIC_CHAR		0xCCCCCCCCUL
