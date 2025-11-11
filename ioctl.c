@@ -27,12 +27,22 @@ struct mx_ioctl_cmds
 	uint64_t *cmds;
 };
 
+struct mx_ioctl_data
+{
+	void *user_addr;
+	uint64_t device_addr;
+	size_t size;
+	bool no_wait;
+};
+
 #define MX_IOCTL_MAGIC			'X'
 #define MX_IOCTL_REGISTER_MBOX		_IOW(MX_IOCTL_MAGIC, 1, struct mx_ioctl_mbox_info)
 #define MX_IOCTL_INIT_MBOX		_IOW(MX_IOCTL_MAGIC, 2, uint32_t)
 #define MX_IOCTL_SEND_CMD_WITH_DATA	_IOW(MX_IOCTL_MAGIC, 3, struct mx_ioctl_cmd_with_data)
 #define MX_IOCTL_RECV_CMDS		_IOWR(MX_IOCTL_MAGIC, 4, struct mx_ioctl_cmds)
 #define MX_IOCTL_SEND_CMDS		_IOWR(MX_IOCTL_MAGIC, 5, struct mx_ioctl_cmds)
+#define MX_IOCTL_READ_DATA		_IOW(MX_IOCTL_MAGIC, 6, struct mx_ioctl_data)
+#define MX_IOCTL_WRITE_DATA		_IOW(MX_IOCTL_MAGIC, 7, struct mx_ioctl_data)
 
 static uint32_t get_pushable_count(struct mx_mbox *mbox)
 {
@@ -258,6 +268,44 @@ out:
 	return 0;
 }
 
+static long ioctl_read_data(struct mx_pci_dev *mx_pdev, unsigned long arg)
+{
+	struct mx_ioctl_data read_data;
+	ssize_t ret;
+
+	if (copy_from_user(&read_data, (void __user *)arg, sizeof(read_data)))
+		return -EFAULT;
+
+	if (read_data.size == 0 || !read_data.user_addr)
+		return -EINVAL;
+
+	ret = read_data_from_device_parallel(mx_pdev, (char __user *)read_data.user_addr, read_data.size,
+			(loff_t *)&read_data.device_addr, IO_OPCODE_DATA_READ);
+	if (ret < 0)
+		return ret;
+
+	return 0;
+}
+
+static long ioctl_write_data(struct mx_pci_dev *mx_pdev, unsigned long arg)
+{
+	struct mx_ioctl_data write_data;
+	ssize_t ret;
+
+	if (copy_from_user(&write_data, (void __user *)arg, sizeof(write_data)))
+		return -EFAULT;
+
+	if (write_data.size == 0 || !write_data.user_addr)
+		return -EINVAL;
+
+	ret = write_data_to_device_parallel(mx_pdev, (const char __user *)write_data.user_addr, write_data.size,
+			(loff_t *)&write_data.device_addr, IO_OPCODE_DATA_WRITE, write_data.no_wait);
+	if (ret < 0)
+		return ret;
+
+	return 0;
+}
+
 long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -271,6 +319,10 @@ long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long
 			return ioctl_recv_cmds(mx_pdev, arg);
 		case MX_IOCTL_SEND_CMDS:
 			return ioctl_send_cmds(mx_pdev, arg);
+		case MX_IOCTL_READ_DATA:
+			return ioctl_read_data(mx_pdev, arg);
+		case MX_IOCTL_WRITE_DATA:
+			return ioctl_write_data(mx_pdev, arg);
 		default:
 			pr_warn("unknown ioctl cmd(%u)\n", cmd);
 			return -EINVAL;
