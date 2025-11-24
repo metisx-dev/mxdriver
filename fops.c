@@ -83,6 +83,11 @@ static ssize_t mxdma_device_read_data(struct file *file, char __user *buf, size_
 		return -EINVAL;
 	}
 
+	if (pos == NULL || *pos == 0) {
+		pr_warn("Invalid position to read\n");
+		return -EINVAL;
+	}
+
 	ret = mxdma_device_prepare(file, &mx_cdev, &mx_pdev);
 	if (ret)
 		return ret;
@@ -101,6 +106,11 @@ static ssize_t mxdma_device_read_context(struct file *file, char __user *buf, si
 
 	if (!count) {
 		pr_warn("size of data to read is zero\n");
+		return -EINVAL;
+	}
+
+	if (pos == NULL || *pos == 0) {
+		pr_warn("Invalid position to read\n");
 		return -EINVAL;
 	}
 
