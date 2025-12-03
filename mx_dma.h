@@ -17,6 +17,11 @@
 #include <asm/current.h>
 #include <asm/cacheflush.h>
 
+#ifndef CONFIG_WO_CXL
+#define MEM_NAME_LEN		(3)
+#define MXDMA_MEM_NAME		"mem"
+#endif
+
 #define MXDMA_NODE_NAME		"mx_dma"
 #define XCENA_PCI_VENDOR_ID	0x20A6
 
@@ -99,6 +104,13 @@ typedef union {
 	};
 	uint64_t u64;
 } mbox_context_t;
+
+#ifndef CONFIG_WO_CXL
+struct mx_device_node {
+	struct device *dev;
+	struct list_head node;
+};
+#endif
 
 struct mx_mbox {
 	uint64_t r_ctx_addr;
@@ -195,9 +207,6 @@ struct mx_pci_dev {
 };
 
 extern struct file_operations *mxdma_fops_array[];
-
-int mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id, int cxl_memdev_id);
-void mxdma_driver_remove(struct pci_dev *pdev);
 
 int transfer_id_alloc(void *ptr);
 void transfer_id_free(unsigned long id);

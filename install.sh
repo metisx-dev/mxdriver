@@ -13,4 +13,12 @@ fi
 make $MAKEVAR clean
 make $MAKEVAR -j"$(nproc)" install
 
+echo mx_dma | tee /etc/modules-load.d/mx_dma.conf
 depmod -a
+
+if command -v update-initramfs >/dev/null 2>&1; then
+	echo "[INFO] update-initramfs found, updating initramfs..."
+	update-initramfs -u
+else
+	echo "[INFO] update-initramfs not found, skipping initramfs update."
+fi

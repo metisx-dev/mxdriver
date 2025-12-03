@@ -7,6 +7,11 @@
 /******************************************************************************/
 static struct class *mxdma_class;
 
+#ifndef CONFIG_WO_CXL
+static LIST_HEAD(mx_device_list_head);
+static DEFINE_MUTEX(mx_device_list_lock);
+#endif
+
 static void mx_event_init(struct mx_pci_dev *mx_pdev)
 {
 	struct mx_event *mx_event = &mx_pdev->event;
@@ -45,8 +50,9 @@ static void pci_device_exit(struct mx_pci_dev* mx_pdev)
 	int irq = pci_irq_vector(pdev, 0);
 
 	free_irq(irq, mx_pdev);
-
+#ifdef CONFIG_WO_CXL
 	pci_disable_msi(pdev);
+#endif
 }
 
 static int pci_device_init(struct mx_pci_dev* mx_pdev)
@@ -71,18 +77,23 @@ static int pci_device_init(struct mx_pci_dev* mx_pdev)
 	if (!pdev->is_busmaster)
 		pci_set_master(pdev);
 
-	ret = pci_enable_msi(pdev);
-	if (ret) {
-		pr_err("Failed to pci_enable_msi (err=%d)\n", ret);
-	} else {
-		int irq = pci_irq_vector(pdev, 0);
-		pr_info("MSI enabled, irq=%d\n", irq);
-
-		ret = request_threaded_irq(irq, msi_irq_handler, NULL, 0, MXDMA_NODE_NAME, mx_pdev);
+	if (pci_dev_msi_enabled(pdev) == false) {
+		ret = pci_enable_msi(pdev);
 		if (ret) {
-			pr_err("Failed to request_threaded_irq (err=%d)\n", ret);
-			pci_disable_msi(pdev);
+			pr_err("Failed to pci_enable_msi (err=%d)\n", ret);
+			return ret;
 		}
+	}
+
+	int irq = pci_irq_vector(pdev, 0);
+	if (irq < 0) {
+		pr_err("Failed to get msi irq vector (err=%d)\n", irq);
+		return -ENODEV;
+	}
+
+	ret = request_threaded_irq(irq, msi_irq_handler, NULL, 0, MXDMA_NODE_NAME, mx_pdev);
+	if (ret) {
+		pr_err("Failed to request_threaded_irq (err=%d)\n", ret);
 	}
 
 	return 0;
@@ -316,50 +327,81 @@ out_fail:
 	return ret;
 }
 
-int mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id, int cxl_memdev_id)
-{
-	int ret;
-
-	if (pdev->vendor != XCENA_PCI_VENDOR_ID) {
-		return 0;
-	}
-
-	ret = create_mx_pdev(pdev, cxl_memdev_id);
-	if (ret) {
-		pr_err("Failed to create_mx_pdev\n");
-		return ret;
-	}
-
-	pr_info("pci device is probed (vendor=%#x device=%#x bdf=%s cxl=mem%d)\n",
-			pdev->vendor, pdev->device, dev_name(&pdev->dev), cxl_memdev_id);
-
-	return 0;
-}
-EXPORT_SYMBOL(mxdma_driver_probe);
-
-void mxdma_driver_remove(struct pci_dev *pdev)
-{
-	destroy_mx_pdev(pdev);
-
-	pr_info("pci device is removed (vendor=%#x, device=%#x, bdf=%s)\n",
-			pdev->vendor, pdev->device, dev_name(&pdev->dev));
-}
-EXPORT_SYMBOL(mxdma_driver_remove);
-
 /******************************************************************************/
 /* PCI Device Driver Support                                                  */
 /******************************************************************************/
-#ifdef CONFIG_WO_CXL
 static const struct pci_device_id pci_ids[] = {
 	{ PCI_DEVICE(XCENA_PCI_VENDOR_ID, PCI_ANY_ID), },
 	{ 0,}
 };
 MODULE_DEVICE_TABLE(pci, pci_ids);
 
+#ifndef CONFIG_WO_CXL
+static int match_mem_prefix(struct device *dev, void *data)
+{
+	const char *name;
+
+	name = dev_name(dev);
+	return name && !strncmp(name, MXDMA_MEM_NAME, MEM_NAME_LEN);
+}
+#endif
+
+static int get_cxl_memdev_id(struct pci_dev *pdev)
+{
+#ifdef CONFIG_WO_CXL
+	static int standalone_id = -1;
+	return ++standalone_id;
+#else
+	int mem_id;
+	struct device *child;
+
+	child = device_find_child(&pdev->dev, NULL, match_mem_prefix);
+	if (!child)
+	{
+		pr_err("No matching CXL memory device found for PCI device %s.\n", dev_name(&pdev->dev));
+		return -ENODEV;
+	}
+
+	if (sscanf(dev_name(child), MXDMA_MEM_NAME "%d", &mem_id) != 1 || mem_id < 0)
+	{
+		pr_err("Failed to parse CXL memory device ID from device name %s.\n", dev_name(child));
+		mem_id = -ENODEV;
+	}
+
+	put_device(child);
+	return mem_id;
+#endif
+}
+
+#ifndef CONFIG_WO_CXL
+static int add_device_into_global_list(struct pci_dev *pdev)
+{
+	struct mx_device_node *mx_node;
+
+	mx_node = devm_kzalloc(&pdev->dev, sizeof(*mx_node), GFP_KERNEL);
+	if (!mx_node)
+		return -ENOMEM;
+	mx_node->dev = &pdev->dev;
+
+	mutex_lock(&mx_device_list_lock);
+	list_add_tail(&mx_node->node, &mx_device_list_head);
+	mutex_unlock(&mx_device_list_lock);
+
+	return 0;
+}
+#endif
+
 static int __mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
-	static int cxl_memdev_id = 0;
 	int ret;
+	int cxl_memdev_id;
+
+	cxl_memdev_id = get_cxl_memdev_id(pdev);
+	if (cxl_memdev_id < 0)
+	{
+		pr_err("Failed to get cxl_memdev_id from PCI device %s\n", dev_name(&pdev->dev));
+		return -ENODEV;
+	}
 
 	ret = create_mx_pdev(pdev, cxl_memdev_id);
 	if (ret) {
@@ -367,10 +409,17 @@ static int __mxdma_driver_probe(struct pci_dev *pdev, const struct pci_device_id
 		return ret;
 	}
 
+#ifndef CONFIG_WO_CXL
+	ret = add_device_into_global_list(pdev);
+	if (ret < 0)
+	{
+		destroy_mx_pdev(pdev);
+		return ret;
+	}
+#endif
+
 	pr_info("pci device is probed (vendor=%#x device=%#x bdf=%s cxl=mem%d)\n",
 			pdev->vendor, pdev->device, dev_name(&pdev->dev), cxl_memdev_id);
-
-	cxl_memdev_id++;
 
 	return 0;
 }
@@ -383,6 +432,7 @@ static void __mxdma_driver_remove(struct pci_dev *pdev)
 			pdev->vendor, pdev->device, dev_name(&pdev->dev));
 }
 
+#ifdef CONFIG_WO_CXL
 static struct pci_driver pci_driver = {
 	.name		= MXDMA_NODE_NAME,
 	.id_table	= pci_ids,
@@ -401,6 +451,49 @@ static char *mxdma_devnode(const struct device *dev, umode_t *mode)
 		*mode = 0666;
 	return kasprintf(GFP_KERNEL, "%s/%s", MXDMA_NODE_NAME, dev_name(dev));
 }
+
+#ifndef CONFIG_WO_CXL
+static void remove_device_from_global_list(struct device *dev)
+{
+	struct mx_device_node *mx_node, *tmp;
+
+	mutex_lock(&mx_device_list_lock);
+	list_for_each_entry_safe(mx_node, tmp, &mx_device_list_head, node) {
+		if (mx_node->dev == dev) {
+			list_del(&mx_node->node);
+			break;
+		}
+	}
+	mutex_unlock(&mx_device_list_lock);
+}
+
+static int mxdma_pci_notify(struct notifier_block *nb, unsigned long action, void *data)
+{
+	struct pci_dev *pdev;
+
+	pdev = to_pci_dev(data);
+	if (pdev->vendor != XCENA_PCI_VENDOR_ID)
+		return NOTIFY_OK;
+
+	switch (action) {
+	case BUS_NOTIFY_BOUND_DRIVER:
+		__mxdma_driver_probe(pdev, NULL);
+		break;
+	case BUS_NOTIFY_UNBIND_DRIVER:
+		__mxdma_driver_remove(pdev);
+		remove_device_from_global_list(&pdev->dev);
+		break;
+	default:
+		break;
+	}
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block mxdma_pci_notifier = {
+	.notifier_call = mxdma_pci_notify,
+};
+#endif
 
 static int mxdma_init(void)
 {
@@ -421,14 +514,38 @@ static int mxdma_init(void)
 #ifdef CONFIG_WO_CXL
 	return pci_register_driver(&pci_driver);
 #else
+	bus_register_notifier(&pci_bus_type, &mxdma_pci_notifier);
 	return 0;
 #endif
 }
+
+#ifndef CONFIG_WO_CXL
+static void destroy_device_list(void)
+{
+	struct mx_device_node *mx_node, *tmp;
+
+	mutex_lock(&mx_device_list_lock);
+	list_for_each_entry_safe(mx_node, tmp, &mx_device_list_head, node) {
+		struct pci_dev *pdev;
+
+		if (!mx_node->dev)
+			continue;
+
+		pdev = to_pci_dev(mx_node->dev);
+		__mxdma_driver_remove(pdev);
+		list_del(&mx_node->node);
+	}
+	mutex_unlock(&mx_device_list_lock);
+}
+#endif
 
 static void mxdma_exit(void)
 {
 #ifdef CONFIG_WO_CXL
 	pci_unregister_driver(&pci_driver);
+#else
+	bus_unregister_notifier(&pci_bus_type, &mxdma_pci_notifier);
+	destroy_device_list();
 #endif
 
 	if (mxdma_class)
@@ -443,4 +560,4 @@ module_exit(mxdma_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("XCENA Inc.");
 MODULE_DESCRIPTION("XCENA MX-DMA Driver");
-
+MODULE_SOFTDEP("post: cxl_pci");
