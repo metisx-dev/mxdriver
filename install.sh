@@ -4,7 +4,7 @@ set -euo pipefail
 
 if [[ -e /sys/firmware/acpi/tables/CEDT ]]; then
     echo "[INFO] CEDT found – building **with** CXL support."
-    MAKEVAR=""
+    MAKEVAR="WO_CXL=1"
 else
     echo "[INFO] CEDT not found – building **without** CXL (WO_CXL=1)."
     MAKEVAR="WO_CXL=1"
