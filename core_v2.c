@@ -57,10 +57,10 @@ struct mx_command {
 struct mx_completion
 {
 	uint64_t result;
-	uint16_t sq_head;
 	uint16_t sq_id;
-	uint16_t command_id;
+	uint16_t sq_head;
 	uint16_t status;
+	uint16_t command_id;
 } __packed;
 
 /******************************************************************************/
@@ -81,7 +81,7 @@ static bool is_popable(struct mx_queue_v2 *queue)
 
 	cqe = &queue->cqes[queue->cq_head];
 	status = le16_to_cpu(READ_ONCE(cqe->status));
-	phase = status & 0x1;
+	phase = (status >> 15) & 0x1;
 	return phase == queue->cq_phase;
 }
 
