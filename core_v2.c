@@ -544,6 +544,9 @@ static int release_io_queue(struct mx_pci_dev *mx_pdev)
 	struct mx_command comm = {};
 	int ret;
 
+	if (!admin_queue || !io_queue)
+		return 0;
+
 	comm.opcode = ADMIN_OPCODE_DELETE_IO_CQ;
 	comm.io_queue_info.cq_id = io_queue->qid;
 	do {
