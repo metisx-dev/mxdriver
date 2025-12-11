@@ -450,6 +450,11 @@ static int submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c, 
 			break;
 		msleep(1);
 	}
+	if (count >= timeout) {
+		pr_err("Timeout waiting for pushable admin queue\n");
+		return false;
+	}
+
 	push_mx_command(queue, c);
 	ring_sq_doorbell(queue);
 	atomic_inc(&queue->common.wait_count);
@@ -459,13 +464,18 @@ static int submit_sync_command(struct mx_queue_v2* queue, struct mx_command *c, 
 			break;
 		msleep(1);
 	}
+	if (count >= timeout) {
+		pr_err("Timeout waiting for popable admin queue\n");
+		return false;
+	}
+
 	pop_mx_completion(queue, &cmpl);
 	ring_cq_doorbell(queue);
 
 	if (result)
 		*result = cmpl.result;
 
-	return count < timeout;
+	return true;
 }
 
 static int configure_io_queue(struct mx_pci_dev *mx_pdev)
@@ -533,6 +543,9 @@ static int release_io_queue(struct mx_pci_dev *mx_pdev)
 	struct mx_queue_v2 *io_queue = (struct mx_queue_v2 *)mx_pdev->io_queue;
 	struct mx_command comm = {};
 	int ret;
+
+	if (!admin_queue || !io_queue)
+		return 0;
 
 	comm.opcode = ADMIN_OPCODE_DELETE_IO_CQ;
 	comm.io_queue_info.cq_id = io_queue->qid;
