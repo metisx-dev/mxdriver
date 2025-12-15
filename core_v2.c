@@ -24,6 +24,7 @@ struct mx_queue_v2 {
 
 	uint32_t depth;
 	uint16_t last_sq_tail;
+	uint16_t last_cq_head;
 	uint16_t sq_tail;
 	uint16_t sq_head;
 	uint16_t cq_head;
@@ -131,7 +132,11 @@ static void ring_sq_doorbell(struct mx_queue_v2 *queue)
 
 static void ring_cq_doorbell(struct mx_queue_v2 *queue)
 {
+	if (queue->last_cq_head == queue->cq_head)
+		return;
+
 	writel(queue->cq_head, queue->db + sizeof(uint32_t));
+	queue->last_cq_head = queue->cq_head;
 }
 
 /******************************************************************************/
