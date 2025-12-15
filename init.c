@@ -337,7 +337,11 @@ static const struct pci_device_id pci_ids[] = {
 MODULE_DEVICE_TABLE(pci, pci_ids);
 
 #ifndef CONFIG_WO_CXL
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
 static int match_mem_prefix(struct device *dev, void *data)
+#else
+static int match_mem_prefix(struct device *dev, const void *data)
+#endif
 {
 	const char *name;
 
