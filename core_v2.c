@@ -111,12 +111,16 @@ static void update_cq_doorbell(struct mx_queue_v2 *queue)
 static void push_mx_command(struct mx_queue_v2 *queue, struct mx_command *comm)
 {
 	memcpy(&queue->sqes[queue->sq_tail], comm, sizeof(struct mx_command));
+	pr_info("%s: opcode=%u flags=%u command_id=%u prp_entry1=0x%llx prp_entry2=0x%llx device_addr=0x%llx size=%llu\n",
+			__func__, comm->opcode, comm->flags, comm->command_id, comm->prp_entry1, comm->prp_entry2, comm->device_addr, comm->size);
 	update_sq_doorbell(queue);
 }
 
 static void pop_mx_completion(struct mx_queue_v2 *queue, struct mx_completion *cmpl)
 {
 	memcpy(cmpl, &queue->cqes[queue->cq_head], sizeof(struct mx_completion));
+	pr_info("%s: result=0x%llx sq_head=%u sq_id=%u command_id=%u status=0x%04x\n",
+			__func__, cmpl->result, cmpl->sq_head, cmpl->sq_id, cmpl->command_id, cmpl->status);
 	queue->sq_head = cmpl->sq_head;
 	update_cq_doorbell(queue);
 }
