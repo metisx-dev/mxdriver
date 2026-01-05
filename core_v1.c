@@ -59,7 +59,7 @@ static bool is_popable(struct mx_queue_v1 *queue)
 	struct mx_mbox *mbox = &queue->cq_mbox;
 	uint32_t pending_count;
 
-	if (atomic_read(&queue->common.wait_count) == 0)
+	if (atomic_read(&queue->common.wait_count) <= 0)
 		return false;
 
 	mbox->ctx.u64 = readq((void *)mbox->r_ctx_addr);

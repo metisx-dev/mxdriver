@@ -241,10 +241,10 @@ static long ioctl_recv_cmds(struct mx_pci_dev *mx_pdev, unsigned long arg)
 
 	cq_mbox = mx_pdev->cq_mbox_list[recv_cmd.qid];
 
+	mutex_lock(&cq_mbox->lock);
 	read_ctrl_from_device(mx_pdev, (char __user *)&ctx.u64, sizeof(uint64_t), (loff_t *)&cq_mbox->r_ctx_addr, IO_OPCODE_CQ_READ);
 	cq_mbox->ctx.tail = ctx.tail;
 
-	mutex_lock(&cq_mbox->lock);
 	if (is_empty(cq_mbox))
 		goto out;
 
