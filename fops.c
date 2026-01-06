@@ -224,6 +224,7 @@ static int mxdma_bdf_open(struct inode *inode, struct file *file)
 }
 
 struct file_operations mxdma_fops_data = {
+	.owner = THIS_MODULE,
 	.open = mxdma_device_open,
 	.release = mxdma_device_release,
 	.read = mxdma_device_read_data,
@@ -231,6 +232,7 @@ struct file_operations mxdma_fops_data = {
 };
 
 struct file_operations mxdma_fops_context = {
+	.owner = THIS_MODULE,
 	.open = mxdma_device_open,
 	.release = mxdma_device_release,
 	.read = mxdma_device_read_context,
@@ -238,18 +240,21 @@ struct file_operations mxdma_fops_context = {
 };
 
 struct file_operations mxdma_fops_ioctl = {
+	.owner = THIS_MODULE,
 	.open = mxdma_device_open,
 	.release = mxdma_device_release,
 	.unlocked_ioctl = mxdma_device_ioctl,
 };
 
 struct file_operations mxdma_fops_event = {
+	.owner = THIS_MODULE,
 	.open = mxdma_device_open,
 	.release = mxdma_device_release,
 	.poll = mxdma_device_poll,
 };
 
 struct file_operations mxdma_fops_bdf = {
+	.owner = THIS_MODULE,
 	.open = mxdma_bdf_open,
 	.read = mxdma_bdf_read,
 };
@@ -262,4 +267,3 @@ struct file_operations *mxdma_fops_array[] = {
 	[MX_CDEV_EVENT] = &mxdma_fops_event,
 	[MX_CDEV_BDF] = &mxdma_fops_bdf,
 };
-
