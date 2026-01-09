@@ -103,16 +103,8 @@ static int submit_handler(void *arg)
 	unsigned long flags;
 
 	while (!kthread_should_stop()) {
-		if (list_empty(&queue->common.sq_list)) {
-			__swait_event_interruptible_timeout(queue->common.sq_wait,
-					kthread_should_stop() ||
-					!list_empty(&queue->common.sq_list),
-					MAX_SCHEDULE_TIMEOUT);
-			continue;
-		}
-
 		__swait_event_interruptible_timeout(queue->common.sq_wait,
-				kthread_should_stop(),
+				!list_empty(&queue->common.sq_list),
 				POLLING_INTERVAL_MSEC);
 
 		spin_lock_irqsave(&queue->common.sq_lock, flags);
@@ -140,16 +132,8 @@ static int complete_handler(void *arg)
 	struct mx_command comm;
 
 	while (!kthread_should_stop()) {
-		if (atomic_read(&queue->common.wait_count) == 0) {
-			__swait_event_interruptible_timeout(queue->common.cq_wait,
-					kthread_should_stop() ||
-					atomic_read(&queue->common.wait_count) > 0,
-					MAX_SCHEDULE_TIMEOUT);
-			continue;
-		}
-
 		__swait_event_interruptible_timeout(queue->common.cq_wait,
-				kthread_should_stop(),
+				atomic_read(&queue->common.wait_count) > 0,
 				POLLING_INTERVAL_MSEC);
 
 		while (is_popable(queue)) {
@@ -422,3 +406,4 @@ void register_mx_ops_v1(struct mx_operations *ops)
 	ops->create_command_sg = create_mx_command_sg;
 	ops->create_command_ctrl = create_mx_command_ctrl;
 }
+

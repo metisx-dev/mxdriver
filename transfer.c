@@ -236,10 +236,7 @@ static int mx_transfer_wait(struct mx_queue *queue, struct mx_transfer *transfer
 {
 	unsigned long left_time;
 
-	left_time = wait_for_completion_interruptible_timeout(&transfer->done,
-			msecs_to_jiffies(timeout_ms));
-	if ((long)left_time < 0)
-		return -ERESTARTSYS;
+	left_time = wait_for_completion_timeout(&transfer->done, msecs_to_jiffies(timeout_ms));
 	if (left_time == 0) {
 		pr_warn("wait_for_completion is timeout (id=%u, user_addr=%#llx device_addr=%#llx size=%#llx, dir=%u)\n",
 				transfer->id, (uint64_t)transfer->user_addr, transfer->device_addr,
@@ -574,3 +571,4 @@ ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev,
 
 	return size;
 }
+
