@@ -160,7 +160,6 @@ static int create_mx_cdev(struct mx_pci_dev *mx_pdev, int type)
 
 	mx_cdev->magic = MAGIC_CHAR;
 	mx_cdev->cdev_no = MKDEV(MAJOR(mx_pdev->dev_no), mx_pdev->num_of_cdev++);
-	mx_cdev->nowait = type == MX_CDEV_DATA_NOWAIT;
 
 	cdev_init(&mx_cdev->cdev, mxdma_fops_array[type]);
 	kobject_set_name(&mx_cdev->cdev.kobj, node_name[type], mx_pdev->dev_id);
@@ -231,6 +230,11 @@ static void destroy_mx_pdev(struct pci_dev *pdev)
 	mx_pdev = dev_get_drvdata(&pdev->dev);
 	if (!mx_pdev)
 		return;
+
+	if (!IS_ERR_OR_NULL(mx_pdev->zombie_cleanup_thread)) {
+		if (kthread_stop(mx_pdev->zombie_cleanup_thread) < 0)
+			pr_err("Failed to stop zombie_cleanup_thread\n");
+	}
 
 	dma_pool_destroy(mx_pdev->page_pool);
 
@@ -305,6 +309,17 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 	}
 
 	mx_event_init(mx_pdev);
+
+	INIT_LIST_HEAD(&mx_pdev->zombie_list);
+	spin_lock_init(&mx_pdev->zombie_lock);
+	init_waitqueue_head(&mx_pdev->zombie_wq);
+	mx_pdev->zombie_cleanup_thread = kthread_run(zombie_cleanup_handler, mx_pdev,
+			"mx_zombie_cleanup_thd%d", mx_pdev->dev_id);
+	if (IS_ERR(mx_pdev->zombie_cleanup_thread)) {
+		ret = PTR_ERR(mx_pdev->zombie_cleanup_thread);
+		pr_err("Failed to create zombie cleanup thread (err=%d)\n", ret);
+		goto out_fail;
+	}
 
 	for (type = 0; type < NUM_OF_MX_CDEV; type++) {
 		ret = create_mx_cdev(mx_pdev, type);

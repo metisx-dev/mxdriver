@@ -68,25 +68,33 @@ static bool is_popable(struct mx_queue_v1 *queue)
 	return pending_count >= data_count;
 }
 
-static void push_mx_command(struct mx_mbox *mbox, struct mx_command *comm)
+static void push_mx_command(struct mx_queue_v1 *queue, struct mx_command *comm)
 {
+	struct mx_mbox *mbox = &queue->sq_mbox;
 	mbox_context_t *ctx = &mbox->ctx;
 	void __iomem *data_addr;
 
 	data_addr = (void *)mbox->data_addr + get_data_offset(ctx->tail);
 	memcpy_toio(data_addr, comm, sizeof(struct mx_command));
 
+	dev_dbg(queue->common.dev, "SQ+ tail=0x%02x id=0x%04x op=%u ha=0x%llx da=0x%llx len=%llu\n",
+			ctx->tail, comm->id, comm->opcode, comm->host_addr, comm->device_addr, comm->size);
+
 	ctx->tail = get_next_index(ctx->tail, sizeof(struct mx_command) / sizeof(uint64_t), mbox->depth);
 	writeq(ctx->u64, (void *)mbox->w_ctx_addr);
 }
 
-static void pop_mx_command(struct mx_mbox *mbox, struct mx_command *comm)
+static void pop_mx_command(struct mx_queue_v1 *queue, struct mx_command *comm)
 {
+	struct mx_mbox *mbox = &queue->cq_mbox;
 	mbox_context_t *ctx = &mbox->ctx;
 	void __iomem *data_addr;
 
 	data_addr = (void *)mbox->data_addr + get_data_offset(ctx->head);
 	memcpy_fromio(comm, data_addr, sizeof(struct mx_command));
+
+	dev_dbg(queue->common.dev, "CQ- head=0x%02x id=0x%04x op=%u ha=0x%llx da=0x%llx len=%llu\n",
+			ctx->head, comm->id, comm->opcode, comm->host_addr, comm->device_addr, comm->size);
 
 	ctx->head = get_next_index(ctx->head, sizeof(struct mx_command) / sizeof(uint64_t), mbox->depth);
 	writeq(ctx->u64, (void *)mbox->w_ctx_addr);
@@ -98,7 +106,6 @@ static void pop_mx_command(struct mx_mbox *mbox, struct mx_command *comm)
 static int submit_handler(void *arg)
 {
 	struct mx_queue_v1 *queue = (struct mx_queue_v1 *)arg;
-	struct mx_mbox *sq_mbox = &queue->sq_mbox;
 	struct mx_transfer *transfer, *tmp;
 	unsigned long flags;
 
@@ -112,8 +119,8 @@ static int submit_handler(void *arg)
 			if (!is_pushable(queue))
 				break;
 
-			push_mx_command(sq_mbox, (struct mx_command*)transfer->command);
-			list_del(&transfer->entry);
+			push_mx_command(queue, (struct mx_command*)transfer->command);
+			list_del_init(&transfer->entry);
 
 			atomic_inc(&queue->common.wait_count);
 			swake_up_one(&queue->common.cq_wait);
@@ -127,7 +134,6 @@ static int submit_handler(void *arg)
 static int complete_handler(void *arg)
 {
 	struct mx_queue_v1 *queue = (struct mx_queue_v1 *)arg;
-	struct mx_mbox *cq_mbox = &queue->cq_mbox;
 	struct mx_transfer *transfer;
 	struct mx_command comm;
 
@@ -137,13 +143,13 @@ static int complete_handler(void *arg)
 				POLLING_INTERVAL_MSEC);
 
 		while (is_popable(queue)) {
-			pop_mx_command(cq_mbox, &comm);
-			atomic_dec(&queue->common.wait_count);
+			pop_mx_command(queue, &comm);
 
 			transfer = find_transfer_by_id(comm.id);
 			if (!transfer)
 				continue;
 
+			atomic_dec(&queue->common.wait_count);
 			transfer->result = comm.host_addr;
 			complete(&transfer->done);
 		}
@@ -366,6 +372,7 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 	}
 	mx_mbox_init(&queue->cq_mbox, (uint64_t)ctx_addr, (uint64_t)data_addr, ctx);
 
+	queue->common.dev = dev;
 	spin_lock_init(&queue->common.sq_lock);
 	INIT_LIST_HEAD(&queue->common.sq_list);
 	init_swait_queue_head(&queue->common.sq_wait);
@@ -373,7 +380,17 @@ static int init_mx_queue(struct mx_pci_dev* mx_pdev)
 	atomic_set(&queue->common.wait_count, 0);
 
 	mx_pdev->submit_thread = kthread_run(submit_handler, queue, "mx_submit_thd%d", mx_pdev->dev_id);
+	if (IS_ERR(mx_pdev->submit_thread)) {
+		pr_err("Failed to create submit thread (err=%ld)\n", PTR_ERR(mx_pdev->submit_thread));
+		return PTR_ERR(mx_pdev->submit_thread);
+	}
+
 	mx_pdev->complete_thread = kthread_run(complete_handler, queue, "mx_complete_thd%d", mx_pdev->dev_id);
+	if (IS_ERR(mx_pdev->complete_thread)) {
+		pr_err("Failed to create complete thread (err=%ld)\n", PTR_ERR(mx_pdev->complete_thread));
+		kthread_stop(mx_pdev->submit_thread);
+		return PTR_ERR(mx_pdev->complete_thread);
+	}
 
 	mx_pdev->io_queue = (struct mx_queue *)queue;
 
@@ -384,13 +401,13 @@ static int release_mx_queue(struct mx_pci_dev *mx_pdev)
 {
 	int ret;
 
-	if (mx_pdev->submit_thread) {
+	if (!IS_ERR_OR_NULL(mx_pdev->submit_thread)) {
 		ret = kthread_stop(mx_pdev->submit_thread);
 		if (ret)
 			pr_err("submit_thread thread doesn't stop properly (err=%d)\n", ret);
 	}
 
-	if (mx_pdev->complete_thread) {
+	if (!IS_ERR_OR_NULL(mx_pdev->complete_thread)) {
 		ret = kthread_stop(mx_pdev->complete_thread);
 		if (ret)
 			pr_err("complete_thread thread doesn't stop properly (err=%d)\n", ret);

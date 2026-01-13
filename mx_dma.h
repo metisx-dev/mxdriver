@@ -38,7 +38,6 @@
 
 enum {
 	MX_CDEV_DATA = 0,
-	MX_CDEV_DATA_NOWAIT,
 	MX_CDEV_CONTEXT,
 	MX_CDEV_IOCTL,
 	MX_CDEV_EVENT,
@@ -48,7 +47,6 @@ enum {
 
 static const char * const node_name[] = {
 	MXDMA_NODE_NAME "%d_data",
-	MXDMA_NODE_NAME "%d_data_nowait",
 	MXDMA_NODE_NAME "%d_context",
 	MXDMA_NODE_NAME "%d_ioctl",
 	MXDMA_NODE_NAME "%d_event",
@@ -122,7 +120,7 @@ struct mx_mbox {
 };
 
 struct mx_transfer {
-	uint16_t id;
+	int id;
 	void __user *user_addr;
 	size_t size;
 	uint64_t device_addr;
@@ -135,6 +133,11 @@ struct mx_transfer {
 	struct list_head entry;
 	struct completion done;
 	uint64_t result;
+	bool is_sg;
+
+	/* Zombie transfer handling */
+	unsigned long zombie_timestamp;
+	struct list_head zombie_entry;
 
 	/* Used for data transfer */
 	struct sg_table sgt;
@@ -161,6 +164,7 @@ struct mx_char_dev {
 };
 
 struct mx_queue {
+	struct device *dev;
 	struct list_head sq_list;
 	spinlock_t sq_lock;
 	atomic_t wait_count;
@@ -204,6 +208,12 @@ struct mx_pci_dev {
 
 	size_t page_size;
 	struct dma_pool *page_pool;
+
+	/* Zombie transfer cleanup */
+	struct list_head zombie_list;
+	spinlock_t zombie_lock;
+	struct task_struct *zombie_cleanup_thread;
+	wait_queue_head_t zombie_wq;
 };
 
 extern struct file_operations *mxdma_fops_array[];
@@ -211,6 +221,7 @@ extern struct file_operations *mxdma_fops_array[];
 int transfer_id_alloc(void *ptr);
 void transfer_id_free(unsigned long id);
 void *find_transfer_by_id(unsigned long id);
+int zombie_cleanup_handler(void *data);
 
 ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev, char __user *buf, size_t size, loff_t *fpos, int opcode);
 ssize_t write_data_to_device_parallel(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);

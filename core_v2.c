@@ -111,12 +111,16 @@ static void update_cq_doorbell(struct mx_queue_v2 *queue)
 static void push_mx_command(struct mx_queue_v2 *queue, struct mx_command *comm)
 {
 	memcpy(&queue->sqes[queue->sq_tail], comm, sizeof(struct mx_command));
+	dev_dbg(queue->common.dev, "SQ+ tail=0x%02x id=0x%04x op=%u ha=0x%llx;0x%llx da=0x%llx len=%llu\n",
+			queue->sq_tail, comm->command_id, comm->opcode, comm->host_addr, comm->prp_entry2, comm->device_addr, comm->size);
 	update_sq_doorbell(queue);
 }
 
 static void pop_mx_completion(struct mx_queue_v2 *queue, struct mx_completion *cmpl)
 {
 	memcpy(cmpl, &queue->cqes[queue->cq_head], sizeof(struct mx_completion));
+	dev_dbg(queue->common.dev, "CQ- head=0x%02x id=0x%04x res=0x%llx\n",
+			queue->cq_head, cmpl->command_id, cmpl->result);
 	queue->sq_head = cmpl->sq_head;
 	update_cq_doorbell(queue);
 }
@@ -159,7 +163,7 @@ static int submit_handler(void *arg)
 				break;
 
 			push_mx_command(queue, transfer->command);
-			list_del(&transfer->entry);
+			list_del_init(&transfer->entry);
 
 			atomic_inc(&queue->common.wait_count);
 			swake_up_one(&queue->common.cq_wait);
@@ -185,12 +189,12 @@ static int complete_handler(void *arg)
 
 		while (is_popable(queue)) {
 			pop_mx_completion(queue, &cmpl);
-			atomic_dec(&queue->common.wait_count);
 
 			transfer = find_transfer_by_id(cmpl.command_id);
 			if (!transfer)
 				continue;
 
+			atomic_dec(&queue->common.wait_count);
 			transfer->result = cmpl.result;
 			complete(&transfer->done);
 		}
@@ -405,6 +409,7 @@ static void configure_queue(struct mx_pci_dev *mx_pdev, struct mx_queue_v2 *queu
 {
 	uint64_t __iomem *dbs = mx_pdev->bar + NVME_REG_DBS;
 
+	queue->common.dev = &mx_pdev->pdev->dev;
 	queue->qid = qid;
 	queue->sq_tail = 0;
 	queue->sq_head = 0;
@@ -535,7 +540,16 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	atomic_set(&io_queue->common.wait_count, 0);
 
 	mx_pdev->submit_thread = kthread_run(submit_handler, io_queue, "mx_submit_thd%d", mx_pdev->dev_id);
+	if (IS_ERR(mx_pdev->submit_thread)) {
+		pr_err("Failed to create submit thread (err=%ld)\n", PTR_ERR(mx_pdev->submit_thread));
+		return PTR_ERR(mx_pdev->submit_thread);
+	}
 	mx_pdev->complete_thread = kthread_run(complete_handler, io_queue, "mx_complete_thd%d", mx_pdev->dev_id);
+	if (IS_ERR(mx_pdev->complete_thread)) {
+		pr_err("Failed to create complete thread (err=%ld)\n", PTR_ERR(mx_pdev->complete_thread));
+		kthread_stop(mx_pdev->submit_thread);
+		return PTR_ERR(mx_pdev->complete_thread);
+	}
 
 	mx_pdev->io_queue = (struct mx_queue *)io_queue;
 
@@ -572,13 +586,13 @@ static int release_io_queue(struct mx_pci_dev *mx_pdev)
 		return ret;
 	}
 
-	if (mx_pdev->submit_thread) {
+	if (!IS_ERR_OR_NULL(mx_pdev->submit_thread)) {
 		ret = kthread_stop(mx_pdev->submit_thread);
 		if (ret)
 			pr_err("submit_thread thread doesn't stop properly (err=%d)\n", ret);
 	}
 
-	if (mx_pdev->complete_thread) {
+	if (!IS_ERR_OR_NULL(mx_pdev->complete_thread)) {
 		ret = kthread_stop(mx_pdev->complete_thread);
 		if (ret)
 			pr_err("complete_thread thread doesn't stop properly (err=%d)\n", ret);

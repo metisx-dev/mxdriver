@@ -67,12 +67,16 @@ static int map_user_addr_to_sg(struct device *dev, struct mx_transfer *transfer)
 	pinned = pin_user_pages_fast((unsigned long)user_addr, pages_nr, gup_flags, transfer->pages);
 	if (pinned < 0) {
 		pr_warn("pin_user_pages_fast failed (err=%ld)\n", pinned);
+		kfree(transfer->pages);
+		transfer->pages = NULL;
 		return (int)pinned;
 	}
 	if (pinned != pages_nr) {
 		pr_warn("pin_user_pages_fast partial (req=%u, got=%ld)\n", pages_nr, pinned);
 		if (pinned > 0)
 			unpin_user_pages(transfer->pages, pinned);
+		kfree(transfer->pages);
+		transfer->pages = NULL;
 		return -EFAULT;
 	}
 	transfer->pages_nr = pages_nr;
@@ -105,15 +109,19 @@ static void desc_list_free(struct mx_pci_dev *mx_pdev, struct mx_transfer *trans
 {
 	int i;
 
-	for (i = 0; i < transfer->desc_list_cnt; i++) {
-		if (transfer->desc_list_va[i])
-			dma_pool_free(mx_pdev->page_pool, transfer->desc_list_va[i], transfer->desc_list_ba[i]);
+	if (transfer->desc_list_va) {
+		for (i = 0; i < transfer->desc_list_cnt; i++) {
+			if (transfer->desc_list_va[i])
+				dma_pool_free(mx_pdev->page_pool, transfer->desc_list_va[i], transfer->desc_list_ba[i]);
+		}
+		kfree(transfer->desc_list_va);
+		transfer->desc_list_va = NULL;
 	}
 
-	if (transfer->desc_list_va)
-		kfree(transfer->desc_list_va);
-	if (transfer->desc_list_ba)
+	if (transfer->desc_list_ba) {
 		kfree(transfer->desc_list_ba);
+		transfer->desc_list_ba = NULL;
+	}
 }
 
 int desc_list_alloc(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int list_cnt)
@@ -122,7 +130,18 @@ int desc_list_alloc(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, in
 
 	transfer->desc_list_cnt = list_cnt;
 	transfer->desc_list_va = kcalloc(list_cnt, sizeof(void *), GFP_KERNEL);
+	if (!transfer->desc_list_va) {
+		pr_warn("Failed to allocate desc_list_va\n");
+		return -ENOMEM;
+	}
+
 	transfer->desc_list_ba = kcalloc(list_cnt, sizeof(dma_addr_t), GFP_KERNEL);
+	if (!transfer->desc_list_ba) {
+		pr_warn("Failed to allocate desc_list_ba\n");
+		kfree(transfer->desc_list_va);
+		transfer->desc_list_va = NULL;
+		return -ENOMEM;
+	}
 
 	for (i = 0; i < list_cnt; i++) {
 		void *cpu_addr;
@@ -140,9 +159,16 @@ int desc_list_alloc(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, in
 
 fail:
 	desc_list_free(mx_pdev, transfer);
-	pr_warn("Failed to dma_alloc_coherent\n");
+	pr_warn("Failed to dma_pool_alloc\n");
 
 	return -ENOMEM;
+}
+
+static void release_mx_transfer(struct mx_transfer *transfer)
+{
+	transfer_id_free(transfer->id);
+	kfree(transfer->command);
+	kfree(transfer);
 }
 
 static struct mx_transfer *alloc_mx_transfer(char __user *user_addr, size_t size, uint64_t device_addr,
@@ -155,8 +181,13 @@ static struct mx_transfer *alloc_mx_transfer(char __user *user_addr, size_t size
 		return NULL;
 	}
 
+	INIT_LIST_HEAD(&transfer->entry);
+	INIT_LIST_HEAD(&transfer->zombie_entry);
+
 	transfer->id = transfer_id_alloc(transfer);
 	if (transfer->id < 0) {
+		pr_warn("Failed to alloc transfer_id\n");
+		kfree(transfer);
 		return NULL;
 	}
 
@@ -190,19 +221,24 @@ static struct mx_transfer **alloc_mx_transfers(void __user *user_addr, size_t to
 		size_t size = min_t(size_t, end_addr - (uint64_t)user_addr, total_size);
 
 		transfer[i] = alloc_mx_transfer(user_addr, size, device_addr, dir);
+		if (!transfer[i]) {
+			pr_warn("Failed to alloc mx_transfer[%d]\n", i);
+			goto fail;
+		}
 		user_addr = (void __user *)((uint64_t)user_addr + size);
 		total_size -= size;
 		device_addr += size;
 	}
 
 	return transfer;
-}
 
-static void release_mx_transfer(struct mx_transfer *transfer)
-{
-	transfer_id_free(transfer->id);
-	kfree(transfer->command);
+fail:
+	for (i = 0; i < count; i++) {
+		if (transfer[i])
+			release_mx_transfer(transfer[i]);
+	}
 	kfree(transfer);
+	return NULL;
 }
 
 static void mx_transfer_queue(struct mx_queue *queue, struct mx_transfer *transfer)
@@ -232,42 +268,86 @@ static void mx_transfer_queue_parallel(struct mx_queue *queue, struct mx_transfe
 	swake_up_one(&queue->sq_wait);
 }
 
-static int mx_transfer_wait(struct mx_queue *queue, struct mx_transfer *transfer)
+static bool mx_transfer_remove_from_sq(struct mx_queue *queue, struct mx_transfer *transfer)
+{
+	unsigned long flags;
+	bool found = false;
+
+	spin_lock_irqsave(&queue->sq_lock, flags);
+	if (!list_empty(&transfer->entry)) {
+		list_del_init(&transfer->entry);
+		found = true;
+	}
+	spin_unlock_irqrestore(&queue->sq_lock, flags);
+
+	return found;
+}
+
+static void mx_transfer_destroy_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer);
+static int mx_transfer_destroy_ctrl(struct mx_transfer *transfer);
+static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
 	unsigned long left_time;
 
-	left_time = wait_for_completion_timeout(&transfer->done, msecs_to_jiffies(timeout_ms));
-	if (left_time == 0) {
-		pr_warn("wait_for_completion is timeout (id=%u, user_addr=%#llx device_addr=%#llx size=%#llx, dir=%u)\n",
-				transfer->id, (uint64_t)transfer->user_addr, transfer->device_addr,
-				(uint64_t)transfer->size, transfer->dir);
-		atomic_dec(&queue->wait_count);
-		return -ETIMEDOUT;
+	left_time = wait_for_completion_interruptible_timeout(&transfer->done, msecs_to_jiffies(timeout_ms));
+	if ((long)left_time <= 0) {
+		unsigned long flags;
+
+		if (left_time == 0)
+			pr_warn("wait_for_completion is timeout (id=%u, size=%#llx, dir=%u, timeout=%u ms)\n",
+					transfer->id, (uint64_t)transfer->size, transfer->dir, timeout_ms);
+		else
+			pr_warn("wait_for_completion is interrupted (id=%u, size=%#llx, dir=%u)\n",
+					transfer->id, (uint64_t)transfer->size, transfer->dir);
+
+		if (mx_transfer_remove_from_sq(mx_pdev->io_queue, transfer))
+			return 0;
+
+		/* Mark as zombie - device might still be accessing memory */
+		transfer->zombie_timestamp = jiffies;
+
+		spin_lock_irqsave(&mx_pdev->zombie_lock, flags);
+		list_add_tail(&transfer->zombie_entry, &mx_pdev->zombie_list);
+		spin_unlock_irqrestore(&mx_pdev->zombie_lock, flags);
+
+		return 0;
 	}
 
-	return 0;
+	if (transfer->is_sg)
+		mx_transfer_destroy_sg(mx_pdev, transfer);
+	else
+		mx_transfer_destroy_ctrl(transfer);
+
+	return transfer->size;
 }
 
-static void mx_transfer_wait_and_destroy_sg(struct work_struct *work);
+static void mx_transfer_wait_work(struct work_struct *work)
+{
+	struct mx_transfer *transfer = container_of(work, struct mx_transfer, work);
+	struct mx_pci_dev *mx_pdev = transfer->mx_pdev;
+
+	mx_transfer_wait(mx_pdev, transfer);
+}
+
 static int mx_transfer_init_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
 {
 	struct device *dev = &mx_pdev->pdev->dev;
 	int ret;
 
 	ret = map_user_addr_to_sg(dev, transfer);
-	if (ret) {
-		pr_warn("Failed to map_user_addr_to_sg (err=%d)\n", ret);
+	if (ret)
 		return ret;
-	}
 
 	transfer->command = mx_pdev->ops.create_command_sg(mx_pdev, transfer, opcode);
 	if (!transfer->command) {
-		pr_warn("Failed to create_command_sg\n");
+		pr_warn("Failed to create_command_sg (id=%u)\n", transfer->id);
+		unmap_user_addr_to_sg(dev, transfer);
 		return -ENOMEM;
 	}
 
 	transfer->mx_pdev = mx_pdev;
-	INIT_WORK(&transfer->work, mx_transfer_wait_and_destroy_sg);
+	transfer->is_sg = true;
+	INIT_WORK(&transfer->work, mx_transfer_wait_work);
 
 	return 0;
 }
@@ -281,88 +361,80 @@ static void mx_transfer_destroy_sg(struct mx_pci_dev *mx_pdev, struct mx_transfe
 	release_mx_transfer(transfer);
 }
 
-static void mx_transfer_wait_and_destroy_sg(struct work_struct *work)
-{
-	struct mx_transfer *transfer = container_of(work, struct mx_transfer, work);
-	struct mx_pci_dev *mx_pdev = transfer->mx_pdev;
-	int ret;
-
-	ret = mx_transfer_wait(mx_pdev->io_queue, transfer);
-	if (ret < 0)
-		pr_warn("Failed to wait mx_transfer (err=%d)\n", ret);
-
-	mx_transfer_destroy_sg(mx_pdev, transfer);
-}
-
-static int mx_transfer_submit_sg(struct mx_pci_dev *mx_pdev,
+static ssize_t mx_transfer_submit_sg(struct mx_pci_dev *mx_pdev,
 		struct mx_transfer *transfer, int opcode, bool nowait)
 {
-	int ret;
+	size_t size = transfer->size;
+	ssize_t ret;
 
 	ret = mx_transfer_init_sg(mx_pdev, transfer, opcode);
 	if (ret < 0) {
-		pr_warn("Failed to init mx_transfer (err=%d)\n", ret);
-		mx_transfer_destroy_sg(mx_pdev, transfer);
+		release_mx_transfer(transfer);
 		return ret;
 	}
 
 	mx_transfer_queue(mx_pdev->io_queue, transfer);
-
-	if (nowait)
+	if (nowait) {
 		schedule_work(&transfer->work);
-	else
-		mx_transfer_wait_and_destroy_sg(&transfer->work);
+		return size;
+	}
 
-	return ret;
+	return mx_transfer_wait(mx_pdev, transfer);
 }
 
-static int mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
+static ssize_t mx_transfer_submit_sg_parallel(struct mx_pci_dev *mx_pdev,
 		struct mx_transfer **transfers, int opcode, int count, bool nowait)
 {
-	int ret;
+	int initialized_count = 0;
+	ssize_t transferred = 0;
+	size_t total_size = 0;
+	int ret = 0;
 	int i;
 
 	for (i = 0; i < count; i++) {
 		ret = mx_transfer_init_sg(mx_pdev, transfers[i], opcode);
-		if (ret < 0) {
-			pr_warn("Failed to init mx_transfer (err=%d)\n", ret);
+		if (ret < 0)
 			break;
-		}
+		total_size += transfers[i]->size;
+		initialized_count++;
 	}
 
 	if (ret < 0) {
-		for (i = 0; i < count; i++)
+		for (i = 0; i < initialized_count; i++)
 			mx_transfer_destroy_sg(mx_pdev, transfers[i]);
+
+		for (i = initialized_count; i < count; i++)
+			release_mx_transfer(transfers[i]);
+
+		kfree(transfers);
 		return ret;
 	}
 
 	mx_transfer_queue_parallel(mx_pdev->io_queue, transfers, count);
 
-	for (i = 0; i < count; i++) {
-		struct mx_transfer *transfer = transfers[i];
-
-		if (nowait)
-			schedule_work(&transfer->work);
-		else
-			mx_transfer_wait_and_destroy_sg(&transfer->work);
+	if (nowait) {
+		for (i = 0; i < count; i++)
+			schedule_work(&transfers[i]->work);
+		kfree(transfers);
+		return total_size;
 	}
 
-	kfree(transfers);
+	for (i = 0; i < count; i++)
+		transferred += mx_transfer_wait(mx_pdev, transfers[i]);
 
-	return ret;
+	kfree(transfers);
+	return transferred;
 }
 
-static void mx_transfer_wait_and_destroy_ctrl(struct work_struct *work);
 static int mx_transfer_init_ctrl(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int opcode)
 {
 	transfer->command = mx_pdev->ops.create_command_ctrl(transfer, opcode);
-	if (!transfer->command) {
-		pr_warn("Failed to create_command_ctrl\n");
+	if (!transfer->command)
 		return -ENOMEM;
-	}
 
 	transfer->mx_pdev = mx_pdev;
-	INIT_WORK(&transfer->work, mx_transfer_wait_and_destroy_ctrl);
+	transfer->is_sg = false;
+	INIT_WORK(&transfer->work, mx_transfer_wait_work);
 
 	return 0;
 }
@@ -375,8 +447,8 @@ static int mx_transfer_destroy_ctrl(struct mx_transfer *transfer)
 		if (access_ok(transfer->user_addr, transfer->size)) {
 			ret = copy_to_user(transfer->user_addr, &transfer->result, sizeof(uint64_t));
 			if (ret)
-				pr_warn("Failed to copy_to_user (%llx -> %llx)\n",
-						(uint64_t)&transfer->result, (uint64_t)transfer->user_addr);
+				pr_warn("Failed to copy_to_user (id=%u, %llx -> %llx, err=%d)\n",
+						transfer->id, (uint64_t)&transfer->result, (uint64_t)transfer->user_addr, ret);
 		} else {
 			*(uint64_t *)transfer->user_addr = transfer->result;
 		}
@@ -387,44 +459,25 @@ static int mx_transfer_destroy_ctrl(struct mx_transfer *transfer)
 	return ret;
 }
 
-static void mx_transfer_wait_and_destroy_ctrl(struct work_struct *work)
-{
-	struct mx_transfer *transfer = container_of(work, struct mx_transfer, work);
-	struct mx_pci_dev *mx_pdev = transfer->mx_pdev;
-	int ret;
-
-	ret = mx_transfer_wait(mx_pdev->io_queue, transfer);
-	if (ret < 0) {
-		pr_warn("Failed to wait mx_transfer (err=%d)\n", ret);
-		return;
-	}
-
-	ret = mx_transfer_destroy_ctrl(transfer);
-	if (ret) {
-		pr_warn("Failed to destroy mx_transfer (err=%d)\n", ret);
-		return;
-	}
-}
-
-static int mx_transfer_submit_ctrl(struct mx_pci_dev *mx_pdev,
+static ssize_t mx_transfer_submit_ctrl(struct mx_pci_dev *mx_pdev,
 		struct mx_transfer *transfer, int opcode, bool nowait)
 {
-	int ret;
+	size_t size = transfer->size;
+	ssize_t ret;
 
 	ret = mx_transfer_init_ctrl(mx_pdev, transfer, opcode);
 	if (ret < 0) {
-		pr_warn("Failed to init mx_transfer (err=%d)\n", ret);
+		release_mx_transfer(transfer);
 		return ret;
 	}
 
 	mx_transfer_queue(mx_pdev->io_queue, transfer);
-
-	if (nowait)
+	if (nowait) {
 		schedule_work(&transfer->work);
-	else
-		mx_transfer_wait_and_destroy_ctrl(&transfer->work);
+		return size;
+	}
 
-	return ret;
+	return mx_transfer_wait(mx_pdev, transfer);
 }
 
 /******************************************************************************/
@@ -434,42 +487,28 @@ ssize_t read_data_from_device(struct mx_pci_dev *mx_pdev,
 		char __user *user_addr, size_t size, loff_t *fpos, int opcode)
 {
 	struct mx_transfer *transfer;
-	int ret;
 
 	transfer = alloc_mx_transfer(user_addr, size, *fpos, DMA_FROM_DEVICE);
 	if (!transfer) {
-		pr_warn("Failed to alloc mx_transfer\n");
+		pr_warn("Failed to alloc mx_transfer for read\n");
 		return -ENOMEM;
 	}
 
-	ret = mx_transfer_submit_sg(mx_pdev, transfer, opcode, false);
-	if (ret) {
-		pr_warn("Failed to submit mx_transfer (err=%d)\n", ret);
-		return ret;
-	}
-
-	return size;
+	return mx_transfer_submit_sg(mx_pdev, transfer, opcode, false);
 }
 
 ssize_t write_data_to_device(struct mx_pci_dev *mx_pdev,
 		const char __user *user_addr, size_t size, loff_t *fpos, int opcode, bool nowait)
 {
 	struct mx_transfer *transfer;
-	int ret;
 
 	transfer = alloc_mx_transfer((char __user *)user_addr, size, *fpos, DMA_TO_DEVICE);
 	if (!transfer) {
-		pr_warn("Failed to alloc mx_transfer\n");
+		pr_warn("Failed to alloc mx_transfer for write\n");
 		return -ENOMEM;
 	}
 
-	ret = mx_transfer_submit_sg(mx_pdev, transfer, opcode, nowait);
-	if (ret) {
-		pr_warn("Failed to submit mx_transfer (err=%d)\n", ret);
-		return ret;
-	}
-
-	return size;
+	return mx_transfer_submit_sg(mx_pdev, transfer, opcode, nowait);
 }
 
 ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev,
@@ -478,7 +517,6 @@ ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev,
 	struct mx_transfer **transfers;
 	uint64_t first_page_index, last_page_index;
 	int nr_pages, count;
-	int ret;
 
 	first_page_index = (uint64_t)buf >> PAGE_SHIFT;
 	last_page_index = ((uint64_t)buf + size - 1) >> PAGE_SHIFT;
@@ -489,16 +527,12 @@ ssize_t read_data_from_device_parallel(struct mx_pci_dev *mx_pdev,
 		return read_data_from_device(mx_pdev, buf, size, fpos, opcode);
 
 	transfers = alloc_mx_transfers(buf, size, *fpos, DMA_FROM_DEVICE, nr_pages, count);
-	if (!transfers)
+	if (!transfers) {
+		pr_warn("Failed to alloc parallel mx_transfers for read (count=%d)\n", count);
 		return -ENOMEM;
-
-	ret = mx_transfer_submit_sg_parallel(mx_pdev, transfers, opcode, count, false);
-	if (ret) {
-		pr_warn("Failed to submit parallel transfers (err=%d)\n", ret);
-		return ret;
 	}
 
-	return size;
+	return mx_transfer_submit_sg_parallel(mx_pdev, transfers, opcode, count, false);
 }
 
 ssize_t write_data_to_device_parallel(struct mx_pci_dev *mx_pdev,
@@ -507,7 +541,6 @@ ssize_t write_data_to_device_parallel(struct mx_pci_dev *mx_pdev,
 	struct mx_transfer **transfers;
 	uint64_t first_page_index, last_page_index;
 	int nr_pages, count;
-	int ret;
 
 	first_page_index = (uint64_t)buf >> PAGE_SHIFT;
 	last_page_index = ((uint64_t)buf + size - 1) >> PAGE_SHIFT;
@@ -518,57 +551,91 @@ ssize_t write_data_to_device_parallel(struct mx_pci_dev *mx_pdev,
 		return write_data_to_device(mx_pdev, buf, size, fpos, opcode, nowait);
 
 	transfers = alloc_mx_transfers((char __user *)buf, size, *fpos, DMA_TO_DEVICE, nr_pages, count);
-	if (!transfers)
+	if (!transfers) {
+		pr_warn("Failed to alloc parallel mx_transfers for write (count=%d)\n", count);
 		return -ENOMEM;
-
-	ret = mx_transfer_submit_sg_parallel(mx_pdev, transfers, opcode, count, nowait);
-	if (ret) {
-		pr_warn("Failed to submit parallel transfers (err=%d)\n", ret);
-		return ret;
 	}
 
-	return size;
+	return mx_transfer_submit_sg_parallel(mx_pdev, transfers, opcode, count, nowait);
 }
 
 ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev,
 		char __user *user_addr, size_t size, loff_t *fpos, int opcode)
 {
 	struct mx_transfer *transfer;
-	int ret;
 
 	transfer = alloc_mx_transfer(user_addr, size, *fpos, DMA_FROM_DEVICE);
 	if (!transfer) {
-		pr_warn("Failed to alloc mx_transfer\n");
+		pr_warn("Failed to alloc mx_transfer for read_ctrl\n");
 		return -ENOMEM;
 	}
 
-	ret = mx_transfer_submit_ctrl(mx_pdev, transfer, opcode, false);
-	if (ret) {
-		pr_warn("Failed to submit mx_transfer (err=%d)\n", ret);
-		return ret;
-	}
-
-	return size;
+	return mx_transfer_submit_ctrl(mx_pdev, transfer, opcode, false);
 }
 
 ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev,
 		const char __user *user_addr, size_t size, loff_t *fpos, int opcode, bool nowait)
 {
 	struct mx_transfer *transfer;
-	int ret;
 
 	transfer = alloc_mx_transfer((char __user *)user_addr, size, *fpos, DMA_TO_DEVICE);
 	if (!transfer) {
-		pr_warn("Failed to alloc mx_transfer\n");
+		pr_warn("Failed to alloc mx_transfer for write_ctrl\n");
 		return -ENOMEM;
 	}
 
-	ret = mx_transfer_submit_ctrl(mx_pdev, transfer, opcode, nowait);
-	if (ret) {
-		pr_warn("Failed to submit mx_transfer (err=%d)\n", ret);
-		return ret;
-	}
-
-	return size;
+	return mx_transfer_submit_ctrl(mx_pdev, transfer, opcode, nowait);
 }
 
+/******************************************************************************/
+/* Zombie Transfer Cleanup                                                   */
+/******************************************************************************/
+int zombie_cleanup_handler(void *data)
+{
+	struct mx_pci_dev *mx_pdev = data;
+	struct mx_transfer *transfer, *tmp;
+	unsigned long grace_period = msecs_to_jiffies(300000); /* 5 minutes */
+	unsigned long flags;
+	LIST_HEAD(to_cleanup);
+
+	while (!kthread_should_stop()) {
+		/* Wait for zombie addition or periodic check */
+		wait_event_interruptible_timeout(mx_pdev->zombie_wq,
+				kthread_should_stop() || !list_empty(&mx_pdev->zombie_list),
+				msecs_to_jiffies(1000)); /* 1 second */
+
+		if (kthread_should_stop())
+			break;
+
+		/* Check and collect zombies that exceeded grace period */
+		spin_lock_irqsave(&mx_pdev->zombie_lock, flags);
+		list_for_each_entry_safe(transfer, tmp, &mx_pdev->zombie_list, zombie_entry) {
+			if (completion_done(&transfer->done)) {
+				pr_info("Zombie transfer completed (id=%u)\n", transfer->id);
+				list_del(&transfer->zombie_entry);
+				list_add_tail(&transfer->zombie_entry, &to_cleanup);
+			} else if (time_after(jiffies, transfer->zombie_timestamp + grace_period)) {
+				pr_err("Zombie transfer timeout (id=%u) - device not responding\n", transfer->id);
+				list_del(&transfer->zombie_entry);
+				list_add_tail(&transfer->zombie_entry, &to_cleanup);
+			}
+		}
+		spin_unlock_irqrestore(&mx_pdev->zombie_lock, flags);
+
+		list_for_each_entry_safe(transfer, tmp, &to_cleanup, zombie_entry) {
+			list_del(&transfer->zombie_entry);
+
+			/* Ensure any pending work is canceled to avoid UAF */
+			cancel_work_sync(&transfer->work);
+
+			if (transfer->is_sg) {
+				unmap_user_addr_to_sg(&mx_pdev->pdev->dev, transfer);
+				desc_list_free(mx_pdev, transfer);
+			}
+
+			release_mx_transfer(transfer);
+		}
+	}
+
+	return 0;
+}
