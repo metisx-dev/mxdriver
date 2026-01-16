@@ -2,7 +2,7 @@
 
 #include "mx_dma.h"
 
-unsigned int timeout_ms = 10 * 1000;
+unsigned int timeout_ms = 60000; /* 60 seconds */
 module_param(timeout_ms, int, 0644);
 unsigned int parallel_count = 6;
 module_param(parallel_count, int, 0644);
