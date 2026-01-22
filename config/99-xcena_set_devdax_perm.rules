@@ -1,0 +1,1 @@
+ACTION=="add|change", SUBSYSTEM=="dax", RUN+="/usr/local/sbin/xcena_set_devdax_perm"

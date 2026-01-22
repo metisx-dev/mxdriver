@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Purpose:
+#   From mx_dma*_bdf -> find related /dev/daxX.Y and set permissions (chmod 0666).
+# Flow:
+#   BDF → mem* → endpoint(uport) → endpoint/decoder* → region(target*) → dax_region* → dax* → /dev/dax*
+
+set -euo pipefail
+MX_DIR="/dev/mx_dma"
+
+rp(){ readlink -f "$1" 2>/dev/null || true; }
+norm(){ echo "${1%/}"; }
+
+bdf2dax() {
+  local bdf="$1" p="/sys/bus/pci/devices/$bdf"
+  [[ -d "$p" ]] || return 0
+
+  mapfile -t mems < <(for m in "$p"/mem*; do [[ -e "$m" ]] && norm "$(rp "$m")"; done | sort -u)
+
+  for mem in "${mems[@]}"; do
+    for ep in /sys/bus/cxl/devices/endpoint*; do
+      [[ -d "$ep" ]] || continue
+      local ep_uport; ep_uport="$(norm "$(rp "$ep/uport")")"
+      [[ "$ep_uport" == "$mem" ]] || continue
+
+      local ep_real; ep_real="$(rp "$ep")"
+      for decdir in "$ep_real"/decoder*; do
+        [[ -d "$decdir" ]] || continue
+        local dec; dec="$(basename "$decdir")"
+
+        while IFS= read -r rpath; do
+          [[ -n "$rpath" ]] || continue
+          local region; region="$(basename "${rpath%/target*}")"
+          local r_real; r_real="$(norm "$(rp "/sys/bus/cxl/devices/$region")")"
+
+          for dr in /sys/bus/cxl/devices/dax_region*; do
+            [[ -e "$dr" ]] || continue
+            local dr_real; dr_real="$(norm "$(rp "$dr")")"
+            [[ "$dr_real" == "$r_real/"* ]] || continue
+
+            for dx in "/sys/bus/cxl/devices/$(basename "$dr")"/dax*; do
+              [[ -d "$dx" ]] || continue
+              [[ -e "/dev/$(basename "$dx")" ]] && echo "/dev/$(basename "$dx")"
+            done
+          done
+        done < <(grep -Rsl "^$dec$" /sys/bus/cxl/devices/region*/target* 2>/dev/null || true)
+      done
+    done
+  done | sort -u
+}
+
+shopt -s nullglob
+bdf_files=("$MX_DIR"/mx_dma*_bdf)
+[[ ${#bdf_files[@]} -gt 0 ]] || exit 0
+
+for bf in "${bdf_files[@]}"; do
+  inst="$(basename "$bf" | sed 's/_bdf$//')"
+  bdf="$(tr -d ' \t\r\n' < "$bf")"
+  [[ -n "$bdf" ]] || continue
+
+  while IFS= read -r dax; do
+    [[ -n "$dax" ]] || continue
+    chmod 0666 "$dax"
+    echo "chmod 0666 $dax  (from $inst $bdf)"
+  done < <(bdf2dax "$bdf" || true)
+done
