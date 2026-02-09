@@ -163,6 +163,18 @@ struct mx_char_dev {
 	bool enabled;
 };
 
+struct mx_queue;
+
+struct mx_queue_ops {
+	bool (*is_pushable)(struct mx_queue *q);
+	void (*push_command)(struct mx_queue *q, void *command);
+	void (*post_submit)(struct mx_queue *q);
+
+	bool (*is_popable)(struct mx_queue *q);
+	void (*pop_completion)(struct mx_queue *q, int *out_id, uint64_t *out_result);
+	void (*post_complete)(struct mx_queue *q);
+};
+
 struct mx_queue {
 	struct device *dev;
 	struct list_head sq_list;
@@ -170,6 +182,7 @@ struct mx_queue {
 	atomic_t wait_count;
 	struct swait_queue_head sq_wait;
 	struct swait_queue_head cq_wait;
+	const struct mx_queue_ops *ops;
 };
 
 struct mx_operations {
@@ -235,6 +248,15 @@ ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf,
 long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long arg);
 
 int desc_list_alloc(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int list_cnt);
+
+/* core_common.c */
+int mx_get_list_count(int total_desc_cnt, int descs_per_list);
+int mx_get_total_desc_count(struct sg_table *sgt, size_t dma_size, bool skip_first);
+uint64_t mx_desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer,
+			   size_t dma_size, int descs_per_list, bool skip_first_entry);
+void mx_stop_queue_threads(struct mx_pci_dev *mx_pdev);
+int mx_submit_handler(void *arg);
+int mx_complete_handler(void *arg);
 
 void register_mx_ops_v1(struct mx_operations *ops);
 void register_mx_ops_v2(struct mx_operations *ops);
