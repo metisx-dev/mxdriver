@@ -1,0 +1,172 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1770613288440,
+  "projectRoot": "/home/dylee/workspace/sdk_release/driver",
+  "techStack": {
+    "languages": [
+      {
+        "name": "C/C++",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "Makefile"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "make build",
+    "testCommand": "make test",
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "config": {
+      "path": "config",
+      "purpose": "Configuration files",
+      "fileCount": 2,
+      "lastAccessed": 1770613288438,
+      "keyFiles": [
+        "99-xcena_set_devdax_perm.rules",
+        "xcena_set_devdax_perm"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "mx_dma.h",
+      "accessCount": 21,
+      "lastAccessed": 1770615301695,
+      "type": "file"
+    },
+    {
+      "path": "core_v2.c",
+      "accessCount": 21,
+      "lastAccessed": 1770615395396,
+      "type": "file"
+    },
+    {
+      "path": "",
+      "accessCount": 20,
+      "lastAccessed": 1770613668536,
+      "type": "directory"
+    },
+    {
+      "path": "core_v1.c",
+      "accessCount": 17,
+      "lastAccessed": 1770615295430,
+      "type": "file"
+    },
+    {
+      "path": "init.c",
+      "accessCount": 11,
+      "lastAccessed": 1770615296090,
+      "type": "file"
+    },
+    {
+      "path": "transfer.c",
+      "accessCount": 11,
+      "lastAccessed": 1770615415367,
+      "type": "file"
+    },
+    {
+      "path": "Makefile",
+      "accessCount": 9,
+      "lastAccessed": 1770614878669,
+      "type": "file"
+    },
+    {
+      "path": "helper.c",
+      "accessCount": 9,
+      "lastAccessed": 1770615347458,
+      "type": "file"
+    },
+    {
+      "path": "core_common.c",
+      "accessCount": 8,
+      "lastAccessed": 1770614894521,
+      "type": "file"
+    },
+    {
+      "path": "ioctl.c",
+      "accessCount": 8,
+      "lastAccessed": 1770615296749,
+      "type": "file"
+    },
+    {
+      "path": "mbox.c",
+      "accessCount": 8,
+      "lastAccessed": 1770615297067,
+      "type": "file"
+    },
+    {
+      "path": "fops.c",
+      "accessCount": 7,
+      "lastAccessed": 1770615296373,
+      "type": "file"
+    },
+    {
+      "path": "install.sh",
+      "accessCount": 6,
+      "lastAccessed": 1770614891369,
+      "type": "file"
+    },
+    {
+      "path": "uninstall.sh",
+      "accessCount": 5,
+      "lastAccessed": 1770614891580,
+      "type": "file"
+    },
+    {
+      "path": "LICENSE",
+      "accessCount": 1,
+      "lastAccessed": 1770613329122,
+      "type": "file"
+    },
+    {
+      "path": "config/xcena_set_devdax_perm",
+      "accessCount": 1,
+      "lastAccessed": 1770613333326,
+      "type": "file"
+    },
+    {
+      "path": "config/99-xcena_set_devdax_perm.rules",
+      "accessCount": 1,
+      "lastAccessed": 1770613333975,
+      "type": "file"
+    },
+    {
+      "path": "CLAUDE.md",
+      "accessCount": 1,
+      "lastAccessed": 1770613492288,
+      "type": "file"
+    },
+    {
+      "path": ".clang-format",
+      "accessCount": 1,
+      "lastAccessed": 1770614505666,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}
