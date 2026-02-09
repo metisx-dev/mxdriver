@@ -144,66 +144,61 @@ static void ring_cq_doorbell(struct mx_queue_v2 *queue)
 }
 
 /******************************************************************************/
-/* Functions for handler                                                      */
+/* Queue ops adapter for unified handlers                                     */
 /******************************************************************************/
-static int submit_handler(void *arg)
+static bool v2_is_pushable(struct mx_queue *q)
 {
-	struct mx_queue_v2 *queue = (struct mx_queue_v2 *)arg;
-	struct mx_transfer *transfer, *tmp;
-	unsigned long flags;
+	struct mx_queue_v2 *queue = container_of(q, struct mx_queue_v2, common);
 
-	while (!kthread_should_stop()) {
-		__swait_event_interruptible_timeout(queue->common.sq_wait,
-				!list_empty(&queue->common.sq_list),
-				POLLING_INTERVAL_MSEC);
-
-		spin_lock_irqsave(&queue->common.sq_lock, flags);
-		list_for_each_entry_safe(transfer, tmp, &queue->common.sq_list, entry) {
-			if (!is_pushable(queue))
-				break;
-
-			push_mx_command(queue, transfer->command);
-			list_del_init(&transfer->entry);
-
-			atomic_inc(&queue->common.wait_count);
-			swake_up_one(&queue->common.cq_wait);
-		}
-		spin_unlock_irqrestore(&queue->common.sq_lock, flags);
-
-		ring_sq_doorbell(queue);
-	}
-
-	return 0;
+	return is_pushable(queue);
 }
 
-static int complete_handler(void *arg)
+static void v2_push_command(struct mx_queue *q, void *command)
 {
-	struct mx_queue_v2 *queue = (struct mx_queue_v2 *)arg;
-	struct mx_transfer *transfer;
+	struct mx_queue_v2 *queue = container_of(q, struct mx_queue_v2, common);
+
+	push_mx_command(queue, (struct mx_command *)command);
+}
+
+static void v2_post_submit(struct mx_queue *q)
+{
+	struct mx_queue_v2 *queue = container_of(q, struct mx_queue_v2, common);
+
+	ring_sq_doorbell(queue);
+}
+
+static bool v2_is_popable(struct mx_queue *q)
+{
+	struct mx_queue_v2 *queue = container_of(q, struct mx_queue_v2, common);
+
+	return is_popable(queue);
+}
+
+static void v2_pop_completion(struct mx_queue *q, int *out_id, uint64_t *out_result)
+{
+	struct mx_queue_v2 *queue = container_of(q, struct mx_queue_v2, common);
 	struct mx_completion cmpl;
 
-	while (!kthread_should_stop()) {
-		__swait_event_interruptible_timeout(queue->common.cq_wait,
-				atomic_read(&queue->common.wait_count) > 0,
-				POLLING_INTERVAL_MSEC);
-
-		while (is_popable(queue)) {
-			pop_mx_completion(queue, &cmpl);
-
-			transfer = find_transfer_by_id(cmpl.command_id);
-			if (!transfer)
-				continue;
-
-			atomic_dec(&queue->common.wait_count);
-			transfer->result = cmpl.result;
-			complete(&transfer->done);
-		}
-
-		ring_cq_doorbell(queue);
-	}
-
-	return 0;
+	pop_mx_completion(queue, &cmpl);
+	*out_id = cmpl.command_id;
+	*out_result = cmpl.result;
 }
+
+static void v2_post_complete(struct mx_queue *q)
+{
+	struct mx_queue_v2 *queue = container_of(q, struct mx_queue_v2, common);
+
+	ring_cq_doorbell(queue);
+}
+
+static const struct mx_queue_ops v2_queue_ops = {
+	.is_pushable	= v2_is_pushable,
+	.push_command	= v2_push_command,
+	.post_submit	= v2_post_submit,
+	.is_popable	= v2_is_popable,
+	.pop_completion	= v2_pop_completion,
+	.post_complete	= v2_post_complete,
+};
 
 /******************************************************************************/
 /* Transfer                                                                   */
@@ -211,93 +206,6 @@ static int complete_handler(void *arg)
 #define SINGLE_DMA_SIZE		PAGE_SIZE
 #define NUM_OF_DESC_PER_LIST	(SINGLE_DMA_SIZE / sizeof(uint64_t))
 
-static int get_total_desc_count(struct mx_transfer *transfer)
-{
-	struct sg_table *sgt = &transfer->sgt;
-	struct scatterlist *sg = sgt->sgl;
-	int total_desc_cnt = 0;
-	int i;
-
-	for_each_sgtable_dma_sg(sgt, sg, i) {
-		int len = sg_dma_len(sg);
-		int desc_cnt = (len + SINGLE_DMA_SIZE - 1) / SINGLE_DMA_SIZE;
-
-		total_desc_cnt += desc_cnt;
-	}
-
-	return total_desc_cnt - 1; // Exclude the first PRP entry
-}
-
-static int get_list_count(int total_desc_cnt)
-{
-	int list_cnt = 1;
-
-	while (total_desc_cnt > NUM_OF_DESC_PER_LIST) {
-		total_desc_cnt -= (NUM_OF_DESC_PER_LIST - 1);
-		list_cnt++;
-	}
-
-	return list_cnt;
-}
-
-static uint64_t desc_list_init(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
-{
-	struct sg_table *sgt = &transfer->sgt;
-	struct scatterlist *sg = sgt->sgl;
-	uint64_t *desc;
-	int total_desc_cnt, list_cnt, list_idx, desc_idx;
-	int ret;
-	int i;
-
-	total_desc_cnt = get_total_desc_count(transfer);
-	list_cnt = get_list_count(total_desc_cnt);
-	ret = desc_list_alloc(mx_pdev, transfer, list_cnt);
-	if (ret) {
-		pr_warn("Failed to desc_list_alloc (err=%d)\n", ret);
-		return 0;
-	}
-
-	list_idx = 0;
-	desc_idx = 0;
-	desc = (uint64_t *)transfer->desc_list_va[list_idx];
-
-	for_each_sgtable_dma_sg(sgt, sg, i) {
-		dma_addr_t dma_addr = sg_dma_address(sg);
-		ssize_t dma_size = sg_dma_len(sg);
-		ssize_t offset = sg->offset;
-		ssize_t len = SINGLE_DMA_SIZE;
-
-		if (offset) {
-			ssize_t tmp = (PAGE_SIZE - offset) & (SINGLE_DMA_SIZE - 1);
-			if (tmp != 0) {
-				len = tmp;
-			}
-		}
-
-		// First entry is handled outside of the loop
-		if (i == 0) {
-			dma_addr += len;
-			dma_size -= len;
-			len = min_t(ssize_t, dma_size, SINGLE_DMA_SIZE);
-		}
-
-		while (dma_size > 0) {
-			if (desc_idx == NUM_OF_DESC_PER_LIST - 1 && total_desc_cnt > 1) {
-				desc[desc_idx] = (uint64_t)transfer->desc_list_ba[++list_idx];
-				desc = (uint64_t *)transfer->desc_list_va[list_idx];
-				desc_idx = 0;
-			}
-
-			desc[desc_idx++] = dma_addr;
-			dma_addr += len;
-			dma_size -= len;
-			len = min_t(ssize_t, dma_size, SINGLE_DMA_SIZE);
-			total_desc_cnt--;
-		}
-	}
-
-	return transfer->desc_list_ba[0];
-}
 
 static struct mx_command *alloc_mx_command(struct mx_transfer *transfer, int opcode)
 {
@@ -348,7 +256,7 @@ static void *create_mx_command_sg(struct mx_pci_dev *mx_pdev, struct mx_transfer
 			return NULL;
 		}
 	} else {
-		comm->prp_entry2 = desc_list_init(mx_pdev, transfer);
+		comm->prp_entry2 = mx_desc_list_init(mx_pdev, transfer, SINGLE_DMA_SIZE, NUM_OF_DESC_PER_LIST, true);
 		if (!comm->prp_entry2) {
 			pr_warn("Failed to desc_list_init\n");
 			kfree(comm);
@@ -533,18 +441,19 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 
 	configure_queue(mx_pdev, io_queue, cq_id);
 
+	io_queue->common.ops = &v2_queue_ops;
 	spin_lock_init(&io_queue->common.sq_lock);
 	INIT_LIST_HEAD(&io_queue->common.sq_list);
 	init_swait_queue_head(&io_queue->common.sq_wait);
 	init_swait_queue_head(&io_queue->common.cq_wait);
 	atomic_set(&io_queue->common.wait_count, 0);
 
-	mx_pdev->submit_thread = kthread_run(submit_handler, io_queue, "mx_submit_thd%d", mx_pdev->dev_id);
+	mx_pdev->submit_thread = kthread_run(mx_submit_handler, &io_queue->common, "mx_submit_thd%d", mx_pdev->dev_id);
 	if (IS_ERR(mx_pdev->submit_thread)) {
 		pr_err("Failed to create submit thread (err=%ld)\n", PTR_ERR(mx_pdev->submit_thread));
 		return PTR_ERR(mx_pdev->submit_thread);
 	}
-	mx_pdev->complete_thread = kthread_run(complete_handler, io_queue, "mx_complete_thd%d", mx_pdev->dev_id);
+	mx_pdev->complete_thread = kthread_run(mx_complete_handler, &io_queue->common, "mx_complete_thd%d", mx_pdev->dev_id);
 	if (IS_ERR(mx_pdev->complete_thread)) {
 		pr_err("Failed to create complete thread (err=%ld)\n", PTR_ERR(mx_pdev->complete_thread));
 		kthread_stop(mx_pdev->submit_thread);
@@ -586,17 +495,7 @@ static int release_io_queue(struct mx_pci_dev *mx_pdev)
 		return ret;
 	}
 
-	if (!IS_ERR_OR_NULL(mx_pdev->submit_thread)) {
-		ret = kthread_stop(mx_pdev->submit_thread);
-		if (ret)
-			pr_err("submit_thread thread doesn't stop properly (err=%d)\n", ret);
-	}
-
-	if (!IS_ERR_OR_NULL(mx_pdev->complete_thread)) {
-		ret = kthread_stop(mx_pdev->complete_thread);
-		if (ret)
-			pr_err("complete_thread thread doesn't stop properly (err=%d)\n", ret);
-	}
+	mx_stop_queue_threads(mx_pdev);
 
 	return 0;
 }

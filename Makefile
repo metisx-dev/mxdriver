@@ -6,7 +6,7 @@ INSTALL_MOD_PATH_ARG := $(if $(strip $(INSTALL_MOD_PATH)),INSTALL_MOD_PATH="$(IN
 
 ifneq ($(KERNELRELEASE),)
 	obj-m += mx_dma.o
-	mx_dma-objs := init.o fops.o helper.o transfer.o mbox.o ioctl.o core_v1.o core_v2.o
+	mx_dma-objs := init.o fops.o helper.o transfer.o mbox.o ioctl.o core_common.o core_v1.o core_v2.o
 ifeq ($(WO_CXL),1)
 	EXTRA_CFLAGS += -DCONFIG_WO_CXL
 endif
