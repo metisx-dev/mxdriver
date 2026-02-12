@@ -28,7 +28,7 @@ fi
 
 if command -v update-initramfs >/dev/null 2>&1; then
 	echo "[INFO] update-initramfs found, updating initramfs..."
-	update-initramfs -u
+	update-initramfs -u -k $(uname -r)
 else
 	echo "[INFO] update-initramfs not found, skipping initramfs update."
 fi
