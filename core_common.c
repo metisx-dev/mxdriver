@@ -139,8 +139,12 @@ int mx_submit_handler(void *arg)
 			ops->push_command(q, transfer->command);
 			list_del_init(&transfer->entry);
 
-			atomic_inc(&q->wait_count);
-			swake_up_one(&q->cq_wait);
+			if (transfer->no_completion) {
+				complete(&transfer->done);
+			} else {
+				atomic_inc(&q->wait_count);
+				swake_up_one(&q->cq_wait);
+			}
 		}
 		spin_unlock_irqrestore(&q->sq_lock, flags);
 
@@ -156,8 +160,7 @@ int mx_complete_handler(void *arg)
 	struct mx_queue *q = (struct mx_queue *)arg;
 	const struct mx_queue_ops *ops = q->ops;
 	struct mx_transfer *transfer;
-	int id;
-	uint64_t result;
+	struct mx_completion_info info;
 
 	while (!kthread_should_stop()) {
 		bool zombie_only = (atomic_read(&q->wait_count) > 0 &&
@@ -168,12 +171,12 @@ int mx_complete_handler(void *arg)
 			zombie_only ? ZOMBIE_POLL_INTERVAL_MSEC : POLLING_INTERVAL_MSEC);
 
 		while (ops->is_popable(q)) {
-			ops->pop_completion(q, &id, &result);
+			ops->pop_completion(q, &info);
 
-			transfer = find_transfer_by_id(id);
+			transfer = find_transfer_by_id(info.id);
 			if (!transfer) {
 				dev_warn_ratelimited(q->dev,
-					"Completion for unknown transfer (id=%d)\n", id);
+					"Completion for unknown transfer (id=%d)\n", info.id);
 				continue;
 			}
 
@@ -189,7 +192,8 @@ int mx_complete_handler(void *arg)
 			if (READ_ONCE(transfer->is_zombie))
 				continue;
 
-			transfer->result = result;
+			transfer->result = info.result;
+			transfer->status = info.status;
 			complete(&transfer->done);
 		}
 

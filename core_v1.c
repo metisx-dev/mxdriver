@@ -24,8 +24,8 @@ struct mx_command {
 			uint64_t page_mode : 2;
 			uint64_t id : 16;
 			uint64_t barrier_index : 6;
-			uint64_t rsvd : 14;
-			uint64_t nowait : 2;
+			uint64_t gaia_opcode : 4;
+			uint64_t rsvd : 12;
 		};
 		uint64_t header;
 	};
@@ -124,14 +124,16 @@ static bool v1_is_popable(struct mx_queue *q)
 	return is_popable(queue);
 }
 
-static void v1_pop_completion(struct mx_queue *q, int *out_id, uint64_t *out_result)
+static void v1_pop_completion(struct mx_queue *q, struct mx_completion_info *info)
 {
 	struct mx_queue_v1 *queue = container_of(q, struct mx_queue_v1, common);
 	struct mx_command comm;
 
 	pop_mx_command(queue, &comm);
-	*out_id = comm.id;
-	*out_result = comm.host_addr;
+	info->id      = comm.id;
+	info->result  = comm.host_addr;
+	/* HW control field carries Gaia status (GaiaCacheManageStatus) on completion */
+	info->status  = comm.control;
 }
 
 static const struct mx_queue_ops v1_queue_ops = {
@@ -231,6 +233,26 @@ static void *create_mx_command_ctrl(struct mx_transfer *transfer, int opcode)
 	return (void*)comm;
 }
 
+static void *create_mx_command_gaia(struct mx_transfer *transfer, int gaia_opcode)
+{
+	struct mx_command *comm = kzalloc(sizeof(struct mx_command), GFP_KERNEL);
+
+	if (!comm) {
+		pr_warn("Failed to allocate mx_command for gaia\n");
+		return NULL;
+	}
+
+	comm->magic = MAGIC_COMMAND;
+	comm->opcode = IO_OPCODE_GAIA;
+	comm->id = transfer->id;
+	comm->gaia_opcode = gaia_opcode;
+	comm->size = transfer->size;
+	comm->device_addr = transfer->device_addr;
+	comm->host_addr = 0;
+
+	return comm;
+}
+
 /******************************************************************************/
 /* Init                                                                       */
 /******************************************************************************/
@@ -316,5 +338,6 @@ void register_mx_ops_v1(struct mx_operations *ops)
 	ops->release_queue = release_mx_queue;
 	ops->create_command_sg = create_mx_command_sg;
 	ops->create_command_ctrl = create_mx_command_ctrl;
+	ops->create_command_gaia = create_mx_command_gaia;
 }
 

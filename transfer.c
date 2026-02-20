@@ -602,6 +602,69 @@ ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev,
 }
 
 /******************************************************************************/
+/* Gaia command                                                               */
+/******************************************************************************/
+long submit_gaia_command(struct mx_pci_dev *mx_pdev, int opcode,
+			 uint64_t device_addr, uint64_t size, bool no_completion,
+			 uint8_t *out_status, uint64_t *out_host_addr)
+{
+	struct mx_transfer *transfer;
+	unsigned long left_time;
+
+	if (!mx_pdev->ops.create_command_gaia)
+		return -EOPNOTSUPP;
+
+	transfer = alloc_mx_transfer(NULL, size, device_addr, DMA_NONE);
+	if (!transfer)
+		return -ENOMEM;
+
+	transfer->command = mx_pdev->ops.create_command_gaia(transfer, opcode);
+	if (!transfer->command) {
+		release_mx_transfer(transfer);
+		return -ENOMEM;
+	}
+
+	transfer->mx_pdev = mx_pdev;
+	transfer->is_sg = false;
+	transfer->no_completion = no_completion;
+	INIT_WORK(&transfer->work, mx_transfer_wait_work);
+
+	mx_transfer_queue(mx_pdev->io_queue, transfer);
+
+	left_time = wait_for_completion_interruptible_timeout(&transfer->done, msecs_to_jiffies(timeout_ms));
+
+	if ((long)left_time <= 0) {
+		unsigned long flags;
+		long ret = (left_time == 0) ? -ETIMEDOUT : -EINTR;
+
+		if (left_time == 0)
+			pr_warn("gaia command timeout (opcode=%d, timeout=%u ms)\n",
+				opcode, timeout_ms);
+		else
+			pr_warn("gaia command interrupted (opcode=%d)\n", opcode);
+
+		if (mx_transfer_remove_from_sq(mx_pdev->io_queue, transfer)) {
+			release_mx_transfer(transfer);
+			return ret;
+		}
+
+		transfer->zombie_timestamp = jiffies;
+		spin_lock_irqsave(&mx_pdev->zombie_lock, flags);
+		list_add_tail(&transfer->zombie_entry, &mx_pdev->zombie_list);
+		spin_unlock_irqrestore(&mx_pdev->zombie_lock, flags);
+		return ret;
+	}
+
+	if (out_host_addr)
+		*out_host_addr = transfer->result;
+	if (out_status)
+		*out_status = transfer->status;
+
+	release_mx_transfer(transfer);
+	return 0;
+}
+
+/******************************************************************************/
 /* Zombie Transfer Cleanup                                                   */
 /******************************************************************************/
 static void drain_zombie_list(struct mx_pci_dev *mx_pdev, struct list_head *list)

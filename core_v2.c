@@ -174,14 +174,15 @@ static bool v2_is_popable(struct mx_queue *q)
 	return is_popable(queue);
 }
 
-static void v2_pop_completion(struct mx_queue *q, int *out_id, uint64_t *out_result)
+static void v2_pop_completion(struct mx_queue *q, struct mx_completion_info *info)
 {
 	struct mx_queue_v2 *queue = container_of(q, struct mx_queue_v2, common);
 	struct mx_completion cmpl;
 
 	pop_mx_completion(queue, &cmpl);
-	*out_id = cmpl.command_id;
-	*out_result = cmpl.result;
+	info->id = cmpl.command_id;
+	info->result = cmpl.result;
+	info->status = 0;
 }
 
 static void v2_post_complete(struct mx_queue *q)

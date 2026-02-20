@@ -35,6 +35,16 @@ struct mx_ioctl_data
 	bool no_wait;
 };
 
+struct mx_ioctl_gaia_cmd
+{
+	uint64_t device_addr;
+	uint64_t host_addr; /* output */
+	uint64_t size;
+	uint16_t opcode;
+	uint8_t  no_completion;
+	uint8_t  status;    /* output */
+};
+
 #define MX_IOCTL_MAGIC			'X'
 #define MX_IOCTL_REGISTER_MBOX		_IOW(MX_IOCTL_MAGIC, 1, struct mx_ioctl_mbox_info)
 #define MX_IOCTL_INIT_MBOX		_IOW(MX_IOCTL_MAGIC, 2, uint32_t)
@@ -43,6 +53,7 @@ struct mx_ioctl_data
 #define MX_IOCTL_SEND_CMDS		_IOWR(MX_IOCTL_MAGIC, 5, struct mx_ioctl_cmds)
 #define MX_IOCTL_READ_DATA		_IOW(MX_IOCTL_MAGIC, 6, struct mx_ioctl_data)
 #define MX_IOCTL_WRITE_DATA		_IOW(MX_IOCTL_MAGIC, 7, struct mx_ioctl_data)
+#define MX_IOCTL_GAIA_CMD		_IOWR(MX_IOCTL_MAGIC, 8, struct mx_ioctl_gaia_cmd)
 
 static uint32_t get_pushable_count(struct mx_mbox *mbox)
 {
@@ -306,6 +317,24 @@ static long ioctl_write_data(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	return 0;
 }
 
+static long ioctl_gaia_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
+{
+	struct mx_ioctl_gaia_cmd gaia;
+	long ret;
+
+	if (copy_from_user(&gaia, (void __user *)arg, sizeof(gaia)))
+		return -EFAULT;
+
+	ret = submit_gaia_command(mx_pdev, gaia.opcode,
+				  gaia.device_addr, gaia.size, gaia.no_completion,
+				  &gaia.status, &gaia.host_addr);
+
+	if (copy_to_user((void __user *)arg, &gaia, sizeof(gaia)))
+		return -EFAULT;
+
+	return ret;
+}
+
 long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -323,6 +352,8 @@ long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long
 			return ioctl_read_data(mx_pdev, arg);
 		case MX_IOCTL_WRITE_DATA:
 			return ioctl_write_data(mx_pdev, arg);
+		case MX_IOCTL_GAIA_CMD:
+			return ioctl_gaia_cmd(mx_pdev, arg);
 		default:
 			pr_warn("unknown ioctl cmd(%u)\n", cmd);
 			return -EINVAL;
