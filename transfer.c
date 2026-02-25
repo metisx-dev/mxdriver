@@ -6,6 +6,8 @@ unsigned int timeout_ms = 60000; /* 60 seconds */
 module_param(timeout_ms, int, 0644);
 unsigned int parallel_count = 6;
 module_param(parallel_count, int, 0644);
+unsigned int zombie_grace_ms = 60000; /* 60 seconds, 0=immediate */
+module_param(zombie_grace_ms, int, 0644);
 
 /******************************************************************************/
 /* Functions for DMA                                                          */
@@ -195,6 +197,8 @@ static struct mx_transfer *alloc_mx_transfer(char __user *user_addr, size_t size
 	transfer->size = size;
 	transfer->device_addr = device_addr;
 	transfer->dir = dir;
+	transfer->is_zombie = false;
+	atomic_set(&transfer->wait_claimed, 0);
 
 	return transfer;
 }
@@ -288,6 +292,7 @@ static int mx_transfer_destroy_ctrl(struct mx_transfer *transfer);
 static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer)
 {
 	unsigned long left_time;
+	ssize_t size;
 
 	left_time = wait_for_completion_interruptible_timeout(&transfer->done, msecs_to_jiffies(timeout_ms));
 	if ((long)left_time <= 0) {
@@ -300,11 +305,18 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 			pr_warn("wait_for_completion is interrupted (id=%u, size=%#llx, dir=%u)\n",
 					transfer->id, (uint64_t)transfer->size, transfer->dir);
 
-		if (mx_transfer_remove_from_sq(mx_pdev->io_queue, transfer))
+		if (mx_transfer_remove_from_sq(mx_pdev->io_queue, transfer)) {
+			if (transfer->is_sg)
+				mx_transfer_destroy_sg(mx_pdev, transfer);
+			else
+				release_mx_transfer(transfer);
 			return 0;
+		}
 
 		/* Mark as zombie - device might still be accessing memory */
+		WRITE_ONCE(transfer->is_zombie, true);
 		transfer->zombie_timestamp = jiffies;
+		atomic_inc(&mx_pdev->io_queue->zombie_wait_count);
 
 		spin_lock_irqsave(&mx_pdev->zombie_lock, flags);
 		list_add_tail(&transfer->zombie_entry, &mx_pdev->zombie_list);
@@ -313,12 +325,14 @@ static ssize_t mx_transfer_wait(struct mx_pci_dev *mx_pdev, struct mx_transfer *
 		return 0;
 	}
 
+	size = transfer->size;
+
 	if (transfer->is_sg)
 		mx_transfer_destroy_sg(mx_pdev, transfer);
 	else
 		mx_transfer_destroy_ctrl(transfer);
 
-	return transfer->size;
+	return size;
 }
 
 static void mx_transfer_wait_work(struct work_struct *work)
@@ -590,52 +604,69 @@ ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev,
 /******************************************************************************/
 /* Zombie Transfer Cleanup                                                   */
 /******************************************************************************/
+static void drain_zombie_list(struct mx_pci_dev *mx_pdev, struct list_head *list)
+{
+	struct mx_transfer *transfer, *tmp;
+
+	list_for_each_entry_safe(transfer, tmp, list, zombie_entry) {
+		bool claimed = (atomic_cmpxchg(&transfer->wait_claimed, 0, 1) == 0);
+
+		list_del(&transfer->zombie_entry);
+
+		if (claimed)
+			atomic_dec(&mx_pdev->io_queue->wait_count);
+		atomic_dec(&mx_pdev->io_queue->zombie_wait_count);
+
+		cancel_work_sync(&transfer->work);
+		transfer_id_free(transfer->id);
+
+		if (transfer->is_sg) {
+			unmap_user_addr_to_sg(&mx_pdev->pdev->dev, transfer);
+			desc_list_free(mx_pdev, transfer);
+		}
+
+		kfree(transfer->command);
+		kfree(transfer);
+	}
+}
+
 int zombie_cleanup_handler(void *data)
 {
 	struct mx_pci_dev *mx_pdev = data;
 	struct mx_transfer *transfer, *tmp;
-	unsigned long grace_period = msecs_to_jiffies(300000); /* 5 minutes */
 	unsigned long flags;
 	LIST_HEAD(to_cleanup);
 
 	while (!kthread_should_stop()) {
-		/* Wait for zombie addition or periodic check */
-		wait_event_interruptible_timeout(mx_pdev->zombie_wq,
-				kthread_should_stop() || !list_empty(&mx_pdev->zombie_list),
-				msecs_to_jiffies(1000)); /* 1 second */
+		unsigned long grace = msecs_to_jiffies(zombie_grace_ms);
+
+		msleep_interruptible(1000);
 
 		if (kthread_should_stop())
 			break;
 
-		/* Check and collect zombies that exceeded grace period */
+		/* Collect zombies ready for cleanup */
 		spin_lock_irqsave(&mx_pdev->zombie_lock, flags);
 		list_for_each_entry_safe(transfer, tmp, &mx_pdev->zombie_list, zombie_entry) {
-			if (completion_done(&transfer->done)) {
-				pr_info("Zombie transfer completed (id=%u)\n", transfer->id);
-				list_del(&transfer->zombie_entry);
-				list_add_tail(&transfer->zombie_entry, &to_cleanup);
-			} else if (time_after(jiffies, transfer->zombie_timestamp + grace_period)) {
-				pr_err("Zombie transfer timeout (id=%u) - device not responding\n", transfer->id);
+			bool hw_done = (atomic_read(&transfer->wait_claimed) == 1);
+
+			if (hw_done || time_after(jiffies,
+					transfer->zombie_timestamp + grace)) {
 				list_del(&transfer->zombie_entry);
 				list_add_tail(&transfer->zombie_entry, &to_cleanup);
 			}
 		}
 		spin_unlock_irqrestore(&mx_pdev->zombie_lock, flags);
 
-		list_for_each_entry_safe(transfer, tmp, &to_cleanup, zombie_entry) {
-			list_del(&transfer->zombie_entry);
-
-			/* Ensure any pending work is canceled to avoid UAF */
-			cancel_work_sync(&transfer->work);
-
-			if (transfer->is_sg) {
-				unmap_user_addr_to_sg(&mx_pdev->pdev->dev, transfer);
-				desc_list_free(mx_pdev, transfer);
-			}
-
-			release_mx_transfer(transfer);
-		}
+		drain_zombie_list(mx_pdev, &to_cleanup);
 	}
+
+	/* Final drain: force-clean all remaining zombies on thread exit */
+	spin_lock_irqsave(&mx_pdev->zombie_lock, flags);
+	list_splice_init(&mx_pdev->zombie_list, &to_cleanup);
+	spin_unlock_irqrestore(&mx_pdev->zombie_lock, flags);
+
+	drain_zombie_list(mx_pdev, &to_cleanup);
 
 	return 0;
 }

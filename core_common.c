@@ -160,18 +160,35 @@ int mx_complete_handler(void *arg)
 	uint64_t result;
 
 	while (!kthread_should_stop()) {
+		bool zombie_only = (atomic_read(&q->wait_count) > 0 &&
+				    atomic_read(&q->zombie_wait_count) == atomic_read(&q->wait_count));
+
 		__swait_event_interruptible_timeout(q->cq_wait,
-				atomic_read(&q->wait_count) > 0,
-				POLLING_INTERVAL_MSEC);
+			atomic_read(&q->wait_count) - atomic_read(&q->zombie_wait_count) > 0,
+			zombie_only ? ZOMBIE_POLL_INTERVAL_MSEC : POLLING_INTERVAL_MSEC);
 
 		while (ops->is_popable(q)) {
 			ops->pop_completion(q, &id, &result);
 
 			transfer = find_transfer_by_id(id);
-			if (!transfer)
+			if (!transfer) {
+				dev_warn_ratelimited(q->dev,
+					"Completion for unknown transfer (id=%d)\n", id);
+				continue;
+			}
+
+			/*
+			 * Claim wait_count decrement — prevents double decrement
+			 * if zombie_cleanup races with this completion.
+			 */
+			if (atomic_cmpxchg(&transfer->wait_claimed, 0, 1) != 0)
 				continue;
 
 			atomic_dec(&q->wait_count);
+
+			if (READ_ONCE(transfer->is_zombie))
+				continue;
+
 			transfer->result = result;
 			complete(&transfer->done);
 		}

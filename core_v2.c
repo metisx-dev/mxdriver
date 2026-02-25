@@ -447,6 +447,7 @@ static int configure_io_queue(struct mx_pci_dev *mx_pdev)
 	init_swait_queue_head(&io_queue->common.sq_wait);
 	init_swait_queue_head(&io_queue->common.cq_wait);
 	atomic_set(&io_queue->common.wait_count, 0);
+	atomic_set(&io_queue->common.zombie_wait_count, 0);
 
 	mx_pdev->submit_thread = kthread_run(mx_submit_handler, &io_queue->common, "mx_submit_thd%d", mx_pdev->dev_id);
 	if (IS_ERR(mx_pdev->submit_thread)) {

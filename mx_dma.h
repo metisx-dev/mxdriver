@@ -35,6 +35,7 @@
 #define HMBOX_UPDATE_BITMASK	(1ull << 18)
 
 #define POLLING_INTERVAL_MSEC	4
+#define ZOMBIE_POLL_INTERVAL_MSEC	1000
 
 enum {
 	MX_CDEV_DATA = 0,
@@ -136,6 +137,8 @@ struct mx_transfer {
 	bool is_sg;
 
 	/* Zombie transfer handling */
+	bool is_zombie;
+	atomic_t wait_claimed;	/* 0=unclaimed, 1=wait_count decremented */
 	unsigned long zombie_timestamp;
 	struct list_head zombie_entry;
 
@@ -180,6 +183,7 @@ struct mx_queue {
 	struct list_head sq_list;
 	spinlock_t sq_lock;
 	atomic_t wait_count;
+	atomic_t zombie_wait_count;
 	struct swait_queue_head sq_wait;
 	struct swait_queue_head cq_wait;
 	const struct mx_queue_ops *ops;
@@ -226,7 +230,6 @@ struct mx_pci_dev {
 	struct list_head zombie_list;
 	spinlock_t zombie_lock;
 	struct task_struct *zombie_cleanup_thread;
-	wait_queue_head_t zombie_wq;
 };
 
 extern struct file_operations *mxdma_fops_array[];

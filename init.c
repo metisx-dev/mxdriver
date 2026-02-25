@@ -231,14 +231,14 @@ static void destroy_mx_pdev(struct pci_dev *pdev)
 	if (!mx_pdev)
 		return;
 
+	mx_pdev->ops.release_queue(mx_pdev);
+
 	if (!IS_ERR_OR_NULL(mx_pdev->zombie_cleanup_thread)) {
 		if (kthread_stop(mx_pdev->zombie_cleanup_thread) < 0)
 			pr_err("Failed to stop zombie_cleanup_thread\n");
 	}
 
 	dma_pool_destroy(mx_pdev->page_pool);
-
-	mx_pdev->ops.release_queue(mx_pdev);
 
 	for (type = 0; type < NUM_OF_MX_CDEV; type++)
 		destroy_mx_cdev(&mx_pdev->mx_cdev[type]);
@@ -312,7 +312,6 @@ static int create_mx_pdev(struct pci_dev *pdev, int cxl_memdev_id)
 
 	INIT_LIST_HEAD(&mx_pdev->zombie_list);
 	spin_lock_init(&mx_pdev->zombie_lock);
-	init_waitqueue_head(&mx_pdev->zombie_wq);
 	mx_pdev->zombie_cleanup_thread = kthread_run(zombie_cleanup_handler, mx_pdev,
 			"mx_zombie_cleanup_thd%d", mx_pdev->dev_id);
 	if (IS_ERR(mx_pdev->zombie_cleanup_thread)) {
