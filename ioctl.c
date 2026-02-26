@@ -328,11 +328,13 @@ static long ioctl_gaia_cmd(struct mx_pci_dev *mx_pdev, unsigned long arg)
 	ret = submit_gaia_command(mx_pdev, gaia.opcode,
 				  gaia.device_addr, gaia.size, gaia.no_completion,
 				  &gaia.status, &gaia.host_addr);
+	if (ret)
+		return ret;
 
 	if (copy_to_user((void __user *)arg, &gaia, sizeof(gaia)))
 		return -EFAULT;
 
-	return ret;
+	return 0;
 }
 
 long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long arg)

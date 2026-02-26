@@ -140,6 +140,7 @@ int mx_submit_handler(void *arg)
 			list_del_init(&transfer->entry);
 
 			if (transfer->no_completion) {
+				atomic_set(&transfer->wait_claimed, 1);
 				complete(&transfer->done);
 			} else {
 				atomic_inc(&q->wait_count);
