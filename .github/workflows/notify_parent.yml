@@ -14,6 +14,6 @@ jobs:
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-          repository: metisx-dev/sdk_release
+          repository: xcena-dev/sdk_release
           event-type: main_merged_notification_from_driver
           client-payload: '{"message": "PR merged into main"}'
