@@ -136,15 +136,17 @@ static int dev_map(struct mx_pci_dev *mx_pdev)
 
 static int set_dma_addressing(struct pci_dev *pdev)
 {
-	/* 64-bit addressing capability for MXDMA? */
-	if (!dma_set_mask(&pdev->dev, DMA_BIT_MASK(64))) {
-		/* use 64-bit DMA */
-		pr_info("use 64-bit DMA\n");
-		dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(64));
+	/* 48-bit addressing capability for MXDMA? */
+	if (!dma_set_mask(&pdev->dev, DMA_BIT_MASK(48))) {
+		/* use 48-bit DMA */
+		pr_info("use 48-bit DMA\n");
+		if (dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(48)))
+			return -EINVAL;
 	} else if (!dma_set_mask(&pdev->dev, DMA_BIT_MASK(32))) {
 		/* use 32-bit DMA */
 		pr_info("use 32-bit DMA\n");
-		dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
+		if (dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32)))
+			return -EINVAL;
 	} else {
 		return -EINVAL;
 	}
