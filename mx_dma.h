@@ -70,6 +70,7 @@ enum {
 	IO_OPCODE_SQ_WRITE,
 	IO_OPCODE_CQ_READ,
 	IO_OPCODE_CQ_WRITE,
+	IO_OPCODE_PASSTHRU,
 };
 
 static const char * const mxdma_op_name[] = {
@@ -81,6 +82,7 @@ static const char * const mxdma_op_name[] = {
 	"W_SQ(5)",
 	"R_CQ(6)",
 	"W_CQ(7)",
+	"PASSTHRU(8)",
 };
 
 typedef union {
@@ -136,6 +138,10 @@ struct mx_transfer {
 	uint64_t result;
 	bool is_sg;
 
+	/* Passthrough command support */
+	bool     no_completion;
+	uint8_t  status;
+
 	/* Zombie transfer handling */
 	bool is_zombie;
 	atomic_t wait_claimed;	/* 0=unclaimed, 1=wait_count decremented */
@@ -168,13 +174,19 @@ struct mx_char_dev {
 
 struct mx_queue;
 
+struct mx_completion_info {
+	int id;
+	uint64_t result;
+	uint8_t status;
+};
+
 struct mx_queue_ops {
 	bool (*is_pushable)(struct mx_queue *q);
 	void (*push_command)(struct mx_queue *q, void *command);
 	void (*post_submit)(struct mx_queue *q);
 
 	bool (*is_popable)(struct mx_queue *q);
-	void (*pop_completion)(struct mx_queue *q, int *out_id, uint64_t *out_result);
+	void (*pop_completion)(struct mx_queue *q, struct mx_completion_info *info);
 	void (*post_complete)(struct mx_queue *q);
 };
 
@@ -194,6 +206,7 @@ struct mx_operations {
 	int (*release_queue) (struct mx_pci_dev *);
 	void * (*create_command_sg) (struct mx_pci_dev *, struct mx_transfer *, int);
 	void * (*create_command_ctrl) (struct mx_transfer *, int);
+	void * (*create_command_passthru) (struct mx_transfer *, int subopcode);
 } __randomize_layout;
 
 struct mx_pci_dev {
@@ -249,6 +262,10 @@ ssize_t read_ctrl_from_device(struct mx_pci_dev *mx_pdev, char __user *buf, size
 ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev, const char __user *buf, size_t size, loff_t *fpos, int opcode, bool nowait);
 
 long ioctl_to_device(struct mx_pci_dev *mx_pdev, unsigned int cmd, unsigned long arg);
+
+long submit_passthru_command(struct mx_pci_dev *mx_pdev, int subopcode,
+			    uint64_t device_addr, uint64_t size, bool no_completion,
+			    uint8_t *out_status, uint64_t *out_host_addr);
 
 int desc_list_alloc(struct mx_pci_dev *mx_pdev, struct mx_transfer *transfer, int list_cnt);
 

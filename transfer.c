@@ -602,6 +602,82 @@ ssize_t write_ctrl_to_device(struct mx_pci_dev *mx_pdev,
 }
 
 /******************************************************************************/
+/* Passthrough command                                                        */
+/******************************************************************************/
+long submit_passthru_command(struct mx_pci_dev *mx_pdev, int subopcode,
+			     uint64_t device_addr, uint64_t size, bool no_completion,
+			     uint8_t *out_status, uint64_t *out_host_addr)
+{
+	struct mx_transfer *transfer;
+	unsigned long left_time;
+
+	if (!mx_pdev->ops.create_command_passthru)
+		return -EOPNOTSUPP;
+
+	transfer = alloc_mx_transfer(NULL, size, device_addr, DMA_NONE);
+	if (!transfer)
+		return -ENOMEM;
+
+	transfer->command = mx_pdev->ops.create_command_passthru(transfer, subopcode);
+	if (!transfer->command) {
+		release_mx_transfer(transfer);
+		return -ENOMEM;
+	}
+
+	transfer->mx_pdev = mx_pdev;
+	transfer->is_sg = false;
+	transfer->no_completion = no_completion;
+
+	mx_transfer_queue(mx_pdev->io_queue, transfer);
+
+	if (no_completion) {
+		/*
+		 * HW guarantees no completion for this command.  The submit
+		 * handler signals transfer->done once the command is pushed,
+		 * so we only wait for the push — no timeout/zombie handling.
+		 */
+		wait_for_completion(&transfer->done);
+		release_mx_transfer(transfer);
+		return 0;
+	}
+
+	left_time = wait_for_completion_interruptible_timeout(&transfer->done, msecs_to_jiffies(timeout_ms));
+
+	if ((long)left_time <= 0) {
+		unsigned long flags;
+		long ret = (left_time == 0) ? -ETIMEDOUT : -EINTR;
+
+		if (left_time == 0)
+			pr_warn("passthru command timeout (subopcode=%d, timeout=%u ms)\n",
+				subopcode, timeout_ms);
+		else
+			pr_warn("passthru command interrupted (subopcode=%d)\n", subopcode);
+
+		if (mx_transfer_remove_from_sq(mx_pdev->io_queue, transfer)) {
+			release_mx_transfer(transfer);
+			return ret;
+		}
+
+		WRITE_ONCE(transfer->is_zombie, true);
+		transfer->zombie_timestamp = jiffies;
+		atomic_inc(&mx_pdev->io_queue->zombie_wait_count);
+
+		spin_lock_irqsave(&mx_pdev->zombie_lock, flags);
+		list_add_tail(&transfer->zombie_entry, &mx_pdev->zombie_list);
+		spin_unlock_irqrestore(&mx_pdev->zombie_lock, flags);
+		return ret;
+	}
+
+	if (out_host_addr)
+		*out_host_addr = transfer->result;
+	if (out_status)
+		*out_status = transfer->status;
+
+	release_mx_transfer(transfer);
+	return 0;
+}
+
+/******************************************************************************/
 /* Zombie Transfer Cleanup                                                   */
 /******************************************************************************/
 static void drain_zombie_list(struct mx_pci_dev *mx_pdev, struct list_head *list)
